@@ -18,18 +18,32 @@ export interface MentionBotConfig {
 }
 
 /**
+ * Helpers provided to the mention handler for Discord interaction.
+ */
+export interface MentionHelpers {
+  /** Send a reply to the original message (with @mention for notification) */
+  reply: (text: string) => Promise<void>;
+  /** Show typing indicator in the channel */
+  sendTyping: () => Promise<void>;
+  /** Send a normal (non-reply) message for progress updates. Returns the sent Message for later edit/delete. */
+  sendProgress: (text: string) => Promise<Message>;
+  /** Edit an existing progress message */
+  editProgress: (msg: Message, text: string) => Promise<void>;
+  /** Delete a progress message */
+  deleteProgress: (msg: Message) => Promise<void>;
+}
+
+/**
  * Callback invoked when the bot receives a @mention.
  * 
  * @param prompt - The user's message text (with bot mention removed)
  * @param context - Metadata about the Discord context (channel ID, guild ID, etc.)
- * @param reply - Function to send a reply back to the channel
- * @param sendTyping - Function to show typing indicator
+ * @param helpers - Functions to interact with Discord (reply, progress, typing)
  */
 export type MentionHandler = (
   prompt: string,
   context: MentionContext,
-  reply: (text: string) => Promise<void>,
-  sendTyping: () => Promise<void>,
+  helpers: MentionHelpers,
 ) => Promise<void>;
 
 export interface MentionContext {
@@ -107,15 +121,26 @@ export async function createMentionBot(
       imageUrls,
     };
 
-    // Reply helper: sends a normal text reply, splitting if over 2000 chars
+    // Reply helper: sends a reply with @mention for notification, splitting if over 2000 chars
     const reply = async (text: string) => {
       if (!text) return;
+
+      // Prepend @mention so the user gets a notification
+      const mentionPrefix = `<@${message.author.id}> `;
+      const firstChunkLimit = 2000 - mentionPrefix.length;
 
       const chunks = splitMessage(text, 2000);
       for (let i = 0; i < chunks.length; i++) {
         if (i === 0) {
-          // First chunk: reply to the original message
-          await message.reply(chunks[i]);
+          // First chunk: reply to the original message with @mention
+          const content = chunks[i].length <= firstChunkLimit
+            ? mentionPrefix + chunks[i]
+            : mentionPrefix + chunks[i].substring(0, firstChunkLimit);
+          await message.reply(content);
+          // If we had to truncate, send the rest
+          if (chunks[i].length > firstChunkLimit) {
+            await message.channel.send(chunks[i].substring(firstChunkLimit));
+          }
         } else {
           // Subsequent chunks: send as follow-up messages in the same channel
           await message.channel.send(chunks[i]);
@@ -132,9 +157,39 @@ export async function createMentionBot(
       }
     };
 
+    // Progress message helpers (normal messages, not replies)
+    const sendProgress = async (text: string): Promise<Message> => {
+      return await message.channel.send(text);
+    };
+
+    const editProgress = async (msg: Message, text: string): Promise<void> => {
+      try {
+        await msg.edit(text);
+      } catch {
+        // Ignore edit errors (message may have been deleted)
+      }
+    };
+
+    const deleteProgress = async (msg: Message): Promise<void> => {
+      try {
+        await msg.delete();
+      } catch {
+        // Ignore delete errors (message may already be deleted)
+      }
+    };
+
+    // Build helpers object
+    const helpers: MentionHelpers = {
+      reply,
+      sendTyping,
+      sendProgress,
+      editProgress,
+      deleteProgress,
+    };
+
     // Call the handler
     try {
-      await onMention(prompt, context, reply, sendTyping);
+      await onMention(prompt, context, helpers);
     } catch (error) {
       console.error("Error handling mention:", error);
       try {

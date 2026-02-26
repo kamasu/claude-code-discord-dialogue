@@ -365,9 +365,8 @@ export async function sendToClaudeCode(
           onStreamJson(message);
         }
 
-        // For text messages, send chunks
-        // Skip for JSON stream output as it's handled by onStreamJson
-        if (message.type === 'assistant' && message.message.content && !onStreamJson) {
+        // For text messages, extract response text and optionally send chunks
+        if (message.type === 'assistant' && message.message.content) {
           const textContent = message.message.content
             // deno-lint-ignore no-explicit-any
             .filter((c: any) => c.type === 'text')
@@ -375,10 +374,15 @@ export async function sendToClaudeCode(
             .map((c: any) => c.text)
             .join('');
 
-          if (textContent && onChunk) {
+          // Always track the latest response text
+          if (textContent) {
+            currentResponse = textContent;
+          }
+
+          // Send chunks only when not using onStreamJson (which handles its own streaming)
+          if (textContent && onChunk && !onStreamJson) {
             onChunk(textContent);
           }
-          currentResponse = textContent;
         }
 
         // Track user message IDs for rewind (if checkpointing enabled)
