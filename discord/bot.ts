@@ -4,6 +4,11 @@ import {
   Events,
   TextChannel,
   Message,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ComponentType,
+  type Interaction,
 } from "npm:discord.js@14.14.1";
 
 import { BOT_VERSION } from "../util/version-check.ts";
@@ -31,6 +36,16 @@ export interface MentionHelpers {
   editProgress: (msg: Message, text: string) => Promise<void>;
   /** Delete a progress message */
   deleteProgress: (msg: Message) => Promise<void>;
+  /** Send a progress message with a cancel button. Returns the sent Message. */
+  sendProgressWithCancel: (text: string, cancelId: string) => Promise<Message>;
+  /** Edit a progress message while keeping the cancel button. */
+  editProgressWithCancel: (msg: Message, text: string, cancelId: string) => Promise<void>;
+  /** Disable the cancel button (e.g. after completion or cancellation). */
+  disableCancelButton: (msg: Message) => Promise<void>;
+  /** Register a cancel callback for a given cancel ID. */
+  registerCancel: (cancelId: string, callback: () => void) => void;
+  /** Unregister a cancel callback. */
+  unregisterCancel: (cancelId: string) => void;
 }
 
 /**
@@ -68,12 +83,42 @@ export async function createMentionBot(
 ) {
   const { discordToken } = config;
 
+  // Registry for cancel callbacks: cancelId → abort callback
+  const cancelCallbacks = new Map<string, () => void>();
+
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
     ],
+  });
+
+  // ---- Button interaction handler ----
+  client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+    if (!interaction.isButton()) return;
+
+    const cancelId = interaction.customId;
+    const callback = cancelCallbacks.get(cancelId);
+    if (!callback) {
+      // Not a cancel button we're tracking — ignore
+      try {
+        await interaction.deferUpdate();
+      } catch { /* ignore */ }
+      return;
+    }
+
+    // Execute the cancel callback
+    callback();
+
+    // Acknowledge the interaction and update the button to show cancelled state
+    try {
+      await interaction.update({
+        components: [createCancelButtonRow(cancelId, true)],
+      });
+    } catch {
+      // Ignore interaction errors
+    }
   });
 
   // ---- Ready event ----
@@ -169,6 +214,41 @@ export async function createMentionBot(
       }
     };
 
+    // Cancel button helpers
+    const sendProgressWithCancel = async (text: string, cancelId: string): Promise<Message> => {
+      return await message.channel.send({
+        content: text,
+        components: [createCancelButtonRow(cancelId, false)],
+      });
+    };
+
+    const editProgressWithCancel = async (msg: Message, text: string, cancelId: string): Promise<void> => {
+      try {
+        await msg.edit({
+          content: text,
+          components: [createCancelButtonRow(cancelId, false)],
+        });
+      } catch {
+        // Ignore edit errors
+      }
+    };
+
+    const disableCancelButton = async (msg: Message): Promise<void> => {
+      try {
+        await msg.edit({ components: [] });
+      } catch {
+        // Ignore errors — message may already be deleted
+      }
+    };
+
+    const registerCancel = (cancelId: string, callback: () => void) => {
+      cancelCallbacks.set(cancelId, callback);
+    };
+
+    const unregisterCancel = (cancelId: string) => {
+      cancelCallbacks.delete(cancelId);
+    };
+
     // Build helpers object
     const helpers: MentionHelpers = {
       reply,
@@ -176,6 +256,11 @@ export async function createMentionBot(
       sendProgress,
       editProgress,
       deleteProgress,
+      sendProgressWithCancel,
+      editProgressWithCancel,
+      disableCancelButton,
+      registerCancel,
+      unregisterCancel,
     };
 
     // Call the handler
@@ -207,6 +292,21 @@ export async function createMentionBot(
 // ================================
 // Helpers
 // ================================
+
+/**
+ * Create an ActionRow with a cancel button.
+ * @param cancelId - Unique ID for this cancel button
+ * @param disabled - Whether the button should be disabled
+ */
+function createCancelButtonRow(cancelId: string, disabled: boolean) {
+  const button = new ButtonBuilder()
+    .setCustomId(cancelId)
+    .setLabel(disabled ? '⛔ キャンセル済み' : '🛑 キャンセル')
+    .setStyle(disabled ? ButtonStyle.Secondary : ButtonStyle.Danger)
+    .setDisabled(disabled);
+
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(button);
+}
 
 /**
  * Split a message into chunks that fit within Discord's character limit.

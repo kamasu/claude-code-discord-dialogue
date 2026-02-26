@@ -107,11 +107,14 @@ if (import.meta.main) {
           try { await helpers.sendTyping(); } catch { /* ignore */ }
         }, 8000);
 
-        // Send initial progress message (normal message, not a reply)
+        // Generate a unique cancel ID for this request
+        const cancelId = `cancel-${context.messageId}-${Date.now()}`;
+
+        // Send initial progress message with cancel button
         // deno-lint-ignore no-explicit-any
         let progressMsg: any = null;
         try {
-          progressMsg = await helpers.sendProgress("はい、確認します！🐶");
+          progressMsg = await helpers.sendProgressWithCancel("はい、確認します！🐶", cancelId);
         } catch {
           // Ignore if progress message fails
         }
@@ -135,7 +138,7 @@ if (import.meta.main) {
             // Enough time has passed — edit immediately
             lastEditTime = now;
             pendingEditText = null;
-            helpers.editProgress(progressMsg, text).catch(() => { });
+            helpers.editProgressWithCancel(progressMsg, text, cancelId).catch(() => { });
           } else {
             // Too soon — schedule a debounced edit
             pendingEditText = text;
@@ -143,7 +146,7 @@ if (import.meta.main) {
             pendingEditTimer = setTimeout(() => {
               if (pendingEditText && progressMsg) {
                 lastEditTime = Date.now();
-                helpers.editProgress(progressMsg, pendingEditText).catch(() => { });
+                helpers.editProgressWithCancel(progressMsg, pendingEditText, cancelId).catch(() => { });
                 pendingEditText = null;
               }
             }, EDIT_DEBOUNCE_MS - timeSinceLastEdit);
@@ -152,6 +155,12 @@ if (import.meta.main) {
 
         try {
           const controller = new AbortController();
+
+          // Register cancel callback: button click → abort
+          helpers.registerCancel(cancelId, () => {
+            console.log(`[Cancel] User cancelled request: ${cancelId}`);
+            controller.abort();
+          });
 
           // Build prompt with Discord context metadata
           const fullPrompt = buildPrompt(prompt, context);
@@ -275,19 +284,33 @@ if (import.meta.main) {
           // Cancel any pending debounced edit
           if (pendingEditTimer) clearTimeout(pendingEditTimer);
 
-          // Delete the progress message
-          if (progressMsg) {
-            await helpers.deleteProgress(progressMsg);
-          }
+          // Clean up cancel registration
+          helpers.unregisterCancel(cancelId);
 
-          // Reply with the final response (as a reply with @mention)
-          const response = result.response || "応答がありませんでした。";
-          await helpers.reply(response);
+          // Check if the request was cancelled
+          if (result.response === "Request was cancelled") {
+            // Disable cancel button on progress message
+            if (progressMsg) {
+              await helpers.disableCancelButton(progressMsg);
+            }
+            await helpers.reply("🚫 キャンセルされました。");
+          } else {
+            // Delete the progress message
+            if (progressMsg) {
+              await helpers.deleteProgress(progressMsg);
+            }
+
+            // Reply with the final response (as a reply with @mention)
+            const response = result.response || "応答がありませんでした。";
+            await helpers.reply(response);
+          }
 
         } finally {
           clearInterval(typingInterval);
           // Clean up pending timer if still active
           if (pendingEditTimer) clearTimeout(pendingEditTimer);
+          // Ensure cancel callback is cleaned up
+          helpers.unregisterCancel(cancelId);
         }
       },
     );
