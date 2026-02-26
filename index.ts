@@ -217,41 +217,104 @@ if (import.meta.main) {
             permissionMode: "bypassPermissions",
           };
 
-          // onStreamJson callback — update progress message based on SDK events
+          // onStreamJson callback — update progress message with rich details
           // deno-lint-ignore no-explicit-any
           const onStreamJson = (message: any) => {
             try {
               if (message.type === 'assistant' && message.message?.content) {
-                // Check for tool_use blocks → show which tool is being used
                 // deno-lint-ignore no-explicit-any
-                const toolUses = message.message.content.filter((c: any) => c.type === 'tool_use');
-                if (toolUses.length > 0) {
-                  const toolName = toolUses[toolUses.length - 1].name || 'unknown';
-                  // Make tool name human-readable
-                  const displayName = toolName
-                    .replace(/^mcp__\w+__/, '')  // Remove MCP prefix
-                    .replace(/_/g, ' ');
-                  updateProgress(`🔧 ${displayName} を実行中...`);
+                const content = message.message.content as any[];
+
+                // Check for thinking blocks → show Claude's thought process
+                // deno-lint-ignore no-explicit-any
+                const thinkingBlocks = content.filter((c: any) => c.type === 'thinking' && c.thinking);
+                if (thinkingBlocks.length > 0) {
+                  const thought = thinkingBlocks[thinkingBlocks.length - 1].thinking;
+                  // Show last ~150 chars of thinking (trim to last complete line)
+                  const preview = thought.length > 150
+                    ? '...' + thought.slice(-150).replace(/^[^\n]*\n/, '')
+                    : thought;
+                  updateProgress(`💭 ${preview}`);
                   return;
                 }
 
-                // Check for text content → Claude is writing the response
+                // Check for tool_use blocks → show tool name + input summary
                 // deno-lint-ignore no-explicit-any
-                const hasText = message.message.content.some((c: any) => c.type === 'text' && c.text);
-                if (hasText) {
-                  updateProgress("📝 回答を作成中...");
+                const toolUses = content.filter((c: any) => c.type === 'tool_use');
+                if (toolUses.length > 0) {
+                  const lastTool = toolUses[toolUses.length - 1];
+                  const toolName = (lastTool.name || 'unknown')
+                    .replace(/^mcp__\w+__/, '')  // Remove MCP prefix
+                    .replace(/_/g, ' ');
+
+                  // Extract a meaningful summary from tool input
+                  const input = lastTool.input || {};
+                  const inputSummary = summarizeToolInput(toolName, input);
+                  const line = inputSummary
+                    ? `🔧 ${toolName}\n${inputSummary}`
+                    : `🔧 ${toolName} を実行中...`;
+                  updateProgress(line);
                   return;
+                }
+
+                // Check for text content → show preview of what Claude is writing
+                // deno-lint-ignore no-explicit-any
+                const textBlocks = content.filter((c: any) => c.type === 'text' && c.text);
+                if (textBlocks.length > 0) {
+                  const fullText = textBlocks.map((c: { text: string }) => c.text).join('');
+                  if (fullText.trim()) {
+                    // Show first ~200 chars of the response being written
+                    const preview = fullText.length > 200
+                      ? fullText.substring(0, 200) + '...'
+                      : fullText;
+                    updateProgress(`📝 回答を作成中...\n\n${preview}`);
+                    return;
+                  }
                 }
               }
 
-              // Tool result received
+              // Tool result received — Claude is processing results
               if (message.type === 'tool_result' || message.type === 'result') {
-                updateProgress("📝 回答を作成中...");
+                updateProgress("⚙️ 結果を処理中...");
               }
             } catch {
               // Ignore progress update errors
             }
           };
+
+          // Summarize tool input for progress display
+          // deno-lint-ignore no-explicit-any
+          const summarizeToolInput = (toolName: string, input: any): string => {
+            try {
+              // Search-related tools — show query/content
+              if (input.query) return `🔍 「${truncate(input.query, 80)}」`;
+              if (input.content) return `🔍 「${truncate(input.content, 80)}」`;
+
+              // Message sending — show destination
+              if (input.message) return `💬 「${truncate(input.message, 80)}」`;
+
+              // Read/retrieve — show what's being read
+              if (input.page_id) return `📄 ページ: ${input.page_id.substring(0, 8)}...`;
+              if (input.channelId) return `📺 チャンネル: ${input.channelId}`;
+              if (input.threadId) return `🧵 スレッド: ${input.threadId}`;
+
+              // File operations
+              if (input.path || input.file_path) return `📂 ${input.path || input.file_path}`;
+              if (input.command) return `$ ${truncate(input.command, 80)}`;
+
+              // Generic: show first key-value pair if available
+              const keys = Object.keys(input).filter(k => typeof input[k] === 'string');
+              if (keys.length > 0) {
+                return `${keys[0]}: ${truncate(input[keys[0]], 60)}`;
+              }
+              return '';
+            } catch {
+              return '';
+            }
+          };
+
+          const truncate = (s: string, max: number): string =>
+            s.length > max ? s.substring(0, max) + '...' : s;
 
           // Call Claude Code with streaming progress
           const result = await sendToClaudeCode(
