@@ -58,6 +58,37 @@ async function loadEnvFile(): Promise<void> {
  * Build the prompt that gets sent to Claude Code when a user mentions the bot.
  * Includes Discord context metadata so Claude can use MCP tools to look up messages.
  */
+/** Image data for Claude Vision */
+interface ImageData {
+  base64: string;
+  mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+}
+
+/** Download an image from URL and return base64-encoded data */
+async function downloadImageAsBase64(url: string): Promise<ImageData | null> {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return null;
+
+    const contentType = response.headers.get("content-type") || "image/png";
+    const mediaType = contentType.split(";")[0].trim() as ImageData["mediaType"];
+    const buffer = await response.arrayBuffer();
+
+    // Encode to base64
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte);
+    }
+    const base64 = btoa(binary);
+
+    return { base64, mediaType };
+  } catch (error) {
+    console.error(`Failed to download image: ${url}`, error);
+    return null;
+  }
+}
+
 function buildPrompt(userMessage: string, ctx: MentionContext): string {
   const parts: string[] = [];
 
@@ -69,7 +100,7 @@ function buildPrompt(userMessage: string, ctx: MentionContext): string {
   parts.push(`Message ID: ${ctx.messageId}`);
   parts.push(`</discord-context>`);
   parts.push('');
-  parts.push(userMessage);
+  parts.push(userMessage || '（画像が添付されています。内容を確認してください）');
 
   return parts.join('\n');
 }
@@ -113,6 +144,19 @@ if (import.meta.main) {
           // Build prompt with Discord context metadata
           const fullPrompt = buildPrompt(prompt, context);
 
+          // Download and encode image attachments (if any)
+          const images: ImageData[] = [];
+          if (context.imageUrls.length > 0) {
+            console.log(`Downloading ${context.imageUrls.length} image(s)...`);
+            const results = await Promise.all(
+              context.imageUrls.map(url => downloadImageAsBase64(url))
+            );
+            for (const img of results) {
+              if (img) images.push(img);
+            }
+            console.log(`Successfully downloaded ${images.length} image(s)`);
+          }
+
           // Get existing session for this channel (if any) for conversation continuity
           const existingSessionId = channelSessions.get(context.channelId);
 
@@ -131,6 +175,7 @@ if (import.meta.main) {
             undefined, // onStreamJson
             false,     // continueMode
             modelOptions,
+            images.length > 0 ? images : undefined, // image attachments
           );
 
           // Store session ID for conversation continuity

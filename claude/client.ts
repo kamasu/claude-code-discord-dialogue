@@ -186,7 +186,8 @@ export async function sendToClaudeCode(
   // deno-lint-ignore no-explicit-any
   onStreamJson?: (json: any) => void,
   continueMode?: boolean,
-  modelOptions?: ClaudeModelOptions
+  modelOptions?: ClaudeModelOptions,
+  images?: Array<{ base64: string; mediaType: string }>,
 ): Promise<{
   response: string;
   sessionId?: string;
@@ -240,8 +241,30 @@ export async function sendToClaudeCode(
         ? { type: 'preset' as const, preset: 'claude_code' as const, append: modelOptions.appendSystemPrompt }
         : { type: 'preset' as const, preset: 'claude_code' as const };
 
+      // Build prompt — use content blocks if images are present, plain string otherwise
+      // deno-lint-ignore no-explicit-any
+      let promptValue: any = prompt;
+      if (images && images.length > 0) {
+        // Build multimodal content blocks: text + image(s)
+        // deno-lint-ignore no-explicit-any
+        const contentBlocks: any[] = [
+          { type: "text", text: prompt },
+        ];
+        for (const img of images) {
+          contentBlocks.push({
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: img.mediaType,
+              data: img.base64,
+            },
+          });
+        }
+        promptValue = contentBlocks;
+      }
+
       const queryOptions = {
-        prompt,
+        prompt: promptValue,
         abortController: controller,
         options: {
           cwd: workDir,

@@ -1,7 +1,7 @@
-import { 
-  Client, 
-  GatewayIntentBits, 
-  Events, 
+import {
+  Client,
+  GatewayIntentBits,
+  Events,
   TextChannel,
   Message,
 } from "npm:discord.js@14.14.1";
@@ -42,6 +42,8 @@ export interface MentionContext {
   username: string;
   /** The original message object for advanced use */
   messageId: string;
+  /** URLs of image attachments (JPEG, PNG, GIF, WebP) */
+  imageUrls: string[];
 }
 
 // ================================
@@ -82,8 +84,14 @@ export async function createMentionBot(
     const botMentionPattern = new RegExp(`<@!?${client.user.id}>`, "g");
     const prompt = message.content.replace(botMentionPattern, "").trim();
 
-    // If the message is just a mention with no text, ignore it
-    if (!prompt) {
+    // Extract image attachment URLs
+    const imageContentTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+    const imageUrls = message.attachments
+      .filter(a => a.contentType && imageContentTypes.includes(a.contentType))
+      .map(a => a.url);
+
+    // If the message is just a mention with no text and no images, ignore it
+    if (!prompt && imageUrls.length === 0) {
       await message.reply("何かメッセージを添えてメンションしてください！");
       return;
     }
@@ -96,6 +104,7 @@ export async function createMentionBot(
       userId: message.author.id,
       username: message.author.username,
       messageId: message.id,
+      imageUrls,
     };
 
     // Reply helper: sends a normal text reply, splitting if over 2000 chars
