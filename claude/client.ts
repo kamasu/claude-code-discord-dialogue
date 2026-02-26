@@ -275,9 +275,13 @@ export async function sendToClaudeCode(
           // SDK hooks — deep integration callbacks
           ...(modelOptions?.hooks && Object.keys(modelOptions.hooks).length > 0 && { hooks: modelOptions.hooks }),
           ...(modelOptions?.outputFormat && { outputFormat: modelOptions.outputFormat }),
-          // MCP servers: let CLI auto-discover from .claude/.mcp.json in cwd
-          // (passing programmatically via mcpServers causes exit code 1 with URL-type servers)
-          // ...(mcpServers && { mcpServers }),
+          // MCP servers: pass stdio-type servers programmatically
+          // (URL-type servers cause exit code 1, so filter them out — remote claude.ai servers are auto-discovered)
+          ...(mcpServers && {
+            mcpServers: Object.fromEntries(
+              Object.entries(mcpServers).filter(([_, cfg]) => cfg.type === 'stdio')
+            ),
+          }),
           // Permission / tool-use callback — handles:
           //   1. AskUserQuestion tool → routes to onAskUser callback for interactive Discord flow
           //   2. MCP tools → auto-allow tools from configured servers
