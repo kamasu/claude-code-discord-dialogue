@@ -348,6 +348,7 @@ export async function sendToClaudeCode(
       let currentSessionId: string | undefined;
       let turnCount = 0;
 
+      console.log(`[DEBUG] Starting SDK iteration...`);
       for await (const message of iterator) {
         // Check AbortSignal to stop iteration
         if (controller.signal.aborted) {
@@ -356,6 +357,7 @@ export async function sendToClaudeCode(
         }
 
         currentMessages.push(message);
+        console.log(`[DEBUG] Received message type=${message.type}, keys=${Object.keys(message).join(',')}`);
 
         // For JSON streams, call dedicated callback
         if (onStreamJson) {
@@ -396,6 +398,11 @@ export async function sendToClaudeCode(
 
       // Clear active query when done
       setActiveQuery(null);
+
+      console.log(`[DEBUG] SDK iteration complete. Messages: ${currentMessages.length}, Response length: ${currentResponse.length}`);
+      if (currentMessages.length === 0) {
+        console.log(`[DEBUG] No messages received from SDK! queryOptions.prompt: ${prompt.substring(0, 100)}...`);
+      }
 
       return {
         messages: currentMessages,
