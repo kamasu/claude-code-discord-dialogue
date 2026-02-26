@@ -289,11 +289,10 @@ if (import.meta.main) {
 
           // Check if the request was cancelled
           if (result.response === "Request was cancelled") {
-            // Disable cancel button on progress message
+            // Silently delete the progress message
             if (progressMsg) {
-              await helpers.disableCancelButton(progressMsg);
+              await helpers.deleteProgress(progressMsg);
             }
-            await helpers.reply("🚫 キャンセルされました。");
           } else {
             // Delete the progress message
             if (progressMsg) {

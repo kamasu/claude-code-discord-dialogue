@@ -301,8 +301,8 @@ export async function createMentionBot(
 function createCancelButtonRow(cancelId: string, disabled: boolean) {
   const button = new ButtonBuilder()
     .setCustomId(cancelId)
-    .setLabel(disabled ? '⛔ キャンセル済み' : '🛑 キャンセル')
-    .setStyle(disabled ? ButtonStyle.Secondary : ButtonStyle.Danger)
+    .setLabel(disabled ? 'キャンセル済み' : 'キャンセル')
+    .setStyle(ButtonStyle.Secondary)
     .setDisabled(disabled);
 
   return new ActionRowBuilder<ButtonBuilder>().addComponents(button);
