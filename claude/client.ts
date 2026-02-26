@@ -447,8 +447,8 @@ export async function sendToClaudeCode(
     return {
       response: fullResponse || "No response received",
       sessionId: resultSessionId,
-      cost: 'total_cost_usd' in lastMessage ? lastMessage.total_cost_usd : undefined,
-      duration: 'duration_ms' in lastMessage ? lastMessage.duration_ms : undefined,
+      cost: lastMessage && 'total_cost_usd' in lastMessage ? lastMessage.total_cost_usd : undefined,
+      duration: lastMessage && 'duration_ms' in lastMessage ? lastMessage.duration_ms : undefined,
       modelUsed,
       ...(permissionDenials.length > 0 && { permissionDenials }),
     };
