@@ -154,7 +154,7 @@ if (import.meta.main) {
         // deno-lint-ignore no-explicit-any
         let progressMsg: any = null;
         try {
-          progressMsg = await helpers.sendProgress("🤔 考えています...");
+          progressMsg = await helpers.sendProgress("🐶 くんくん...");
         } catch {
           // Ignore if progress message fails
         }
@@ -165,8 +165,11 @@ if (import.meta.main) {
         let pendingEditTimer: ReturnType<typeof setTimeout> | null = null;
         const EDIT_DEBOUNCE_MS = 2000;
 
-        const updateProgress = (text: string) => {
+        const updateProgress = (rawText: string) => {
           if (!progressMsg) return;
+
+          // Cap at 1500 chars to stay within Discord's 2000-char limit
+          const text = rawText.length > 1500 ? rawText.substring(0, 1500) + '...' : rawText;
 
           const now = Date.now();
           const timeSinceLastEdit = now - lastEditTime;
@@ -230,11 +233,7 @@ if (import.meta.main) {
                 const thinkingBlocks = content.filter((c: any) => c.type === 'thinking' && c.thinking);
                 if (thinkingBlocks.length > 0) {
                   const thought = thinkingBlocks[thinkingBlocks.length - 1].thinking;
-                  // Show last ~150 chars of thinking (trim to last complete line)
-                  const preview = thought.length > 150
-                    ? '...' + thought.slice(-150).replace(/^[^\n]*\n/, '')
-                    : thought;
-                  updateProgress(`💭 ${preview}`);
+                  updateProgress(`🐶💭 ${thought}`);
                   return;
                 }
 
@@ -251,8 +250,8 @@ if (import.meta.main) {
                   const input = lastTool.input || {};
                   const inputSummary = summarizeToolInput(toolName, input);
                   const line = inputSummary
-                    ? `🔧 ${toolName}\n${inputSummary}`
-                    : `🔧 ${toolName} を実行中...`;
+                    ? `🐶 ${toolName} を調べてるワン！\n${inputSummary}`
+                    : `🐶 ${toolName} をフェッチ中ワン！`;
                   updateProgress(line);
                   return;
                 }
@@ -263,11 +262,7 @@ if (import.meta.main) {
                 if (textBlocks.length > 0) {
                   const fullText = textBlocks.map((c: { text: string }) => c.text).join('');
                   if (fullText.trim()) {
-                    // Show first ~200 chars of the response being written
-                    const preview = fullText.length > 200
-                      ? fullText.substring(0, 200) + '...'
-                      : fullText;
-                    updateProgress(`📝 回答を作成中...\n\n${preview}`);
+                    updateProgress(`🐶 書いてるワン！\n\n${fullText}`);
                     return;
                   }
                 }
@@ -275,7 +270,7 @@ if (import.meta.main) {
 
               // Tool result received — Claude is processing results
               if (message.type === 'tool_result' || message.type === 'result') {
-                updateProgress("⚙️ 結果を処理中...");
+                updateProgress("🐶 もぐもぐ... 結果を読んでるワン");
               }
             } catch {
               // Ignore progress update errors
