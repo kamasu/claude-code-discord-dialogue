@@ -4,20 +4,46 @@ import type { AskUserQuestionInput, AskUserCallback } from "./user-question.ts";
 import type { PermissionRequestCallback } from "./permission-request.ts";
 import * as path from "https://deno.land/std@0.208.0/path/mod.ts";
 
-// Load MCP server configs from .claude/mcp.json
+// Load MCP server configs from .claude/mcp.json or .claude/.mcp.json
 async function loadMcpServers(workDir: string): Promise<Record<string, McpServerConfig> | undefined> {
-  try {
-    const mcpPath = path.join(workDir, ".claude", "mcp.json");
-    const raw = await Deno.readTextFile(mcpPath);
-    const parsed = JSON.parse(raw);
-    const servers = parsed?.mcpServers;
-    if (!servers || typeof servers !== "object") return undefined;
+  // Try multiple possible paths for the MCP config file
+  const candidates = [
+    path.join(workDir, ".claude", "mcp.json"),
+    path.join(workDir, ".claude", ".mcp.json"),
+  ];
 
-    // Clean configs to match SDK's McpStdioServerConfig shape and resolve placeholders
-    const result: Record<string, McpServerConfig> = {};
-    for (const [name, cfg] of Object.entries(servers)) {
-      // deno-lint-ignore no-explicit-any
-      const raw = cfg as any;
+  let parsed: Record<string, unknown> | null = null;
+  for (const mcpPath of candidates) {
+    try {
+      const raw = await Deno.readTextFile(mcpPath);
+      parsed = JSON.parse(raw);
+      console.log(`[MCP] Found config at: ${mcpPath}`);
+      break;
+    } catch {
+      // Try next candidate
+    }
+  }
+
+  if (!parsed) return undefined;
+
+  const servers = parsed?.mcpServers;
+  if (!servers || typeof servers !== "object") return undefined;
+
+  // Build configs — supports both "stdio" and "url" type MCP servers
+  const result: Record<string, McpServerConfig> = {};
+  for (const [name, cfg] of Object.entries(servers as Record<string, Record<string, unknown>>)) {
+    // deno-lint-ignore no-explicit-any
+    const raw = cfg as any;
+
+    if (raw.type === "url" && raw.url) {
+      // URL-based MCP server (e.g. Streamable HTTP like mcp-discord)
+      result[name] = {
+        type: "url" as const,
+        url: raw.url,
+        // deno-lint-ignore no-explicit-any
+      } as any;
+    } else {
+      // stdio-based MCP server (default)
       // Resolve ${workspaceFolder:-.} placeholder in args
       const args = Array.isArray(raw.args)
         ? raw.args.map((a: string) => a.replace(/\$\{workspaceFolder:-\.?\}/g, workDir))
@@ -29,12 +55,9 @@ async function loadMcpServers(workDir: string): Promise<Record<string, McpServer
         ...(raw.env && { env: raw.env }),
       };
     }
-    console.log(`[MCP] Loaded ${Object.keys(result).length} MCP server(s): ${Object.keys(result).join(", ")}`);
-    return result;
-  } catch {
-    // File doesn't exist or is invalid — no MCP servers
-    return undefined;
   }
+  console.log(`[MCP] Loaded ${Object.keys(result).length} MCP server(s): ${Object.keys(result).join(", ")}`);
+  return result;
 }
 
 export type { SDKAgentDefinition, SDKModelInfo };
@@ -177,10 +200,10 @@ export async function sendToClaudeCode(
   let fullResponse = "";
   let resultSessionId: string | undefined;
   let modelUsed = modelOptions?.model || "Default";
-  
+
   // Clean up session ID
   const cleanedSessionId = sessionId ? cleanSessionId(sessionId) : undefined;
-  
+
   // Load MCP servers from .claude/mcp.json
   const mcpServers = await loadMcpServers(workDir);
 
@@ -194,10 +217,10 @@ export async function sendToClaudeCode(
     try {
       // Determine which model to use
       const modelToUse = overrideModel || modelOptions?.model;
-      
+
       // Determine permission mode (defaults to dontAsk for Discord — denies anything not pre-approved)
       const permMode = modelOptions?.permissionMode || "dontAsk";
-      
+
       // Build environment variables for the subprocess
       const envVars: Record<string, string> = {
         ...Object.fromEntries(Object.entries(Deno.env.toObject())),
@@ -206,7 +229,7 @@ export async function sendToClaudeCode(
         // Enable experimental Agent Teams if configured
         ...(modelOptions?.enableAgentTeams && { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1' }),
       };
-      
+
       // Apply extra env vars (proxy settings, etc.)
       if (modelOptions?.extraEnv) {
         Object.assign(envVars, modelOptions.extraEnv);
@@ -303,7 +326,7 @@ export async function sendToClaudeCode(
           env: envVars,
         },
       };
-      
+
       const thinkingLabel = modelOptions?.thinking
         ? `, thinking=${modelOptions.thinking.type}${modelOptions.thinking.type === 'enabled' ? `(${modelOptions.thinking.budgetTokens})` : ''}`
         : '';
@@ -314,31 +337,31 @@ export async function sendToClaudeCode(
       } else if (cleanedSessionId) {
         console.log(`Session resuming with ID: ${cleanedSessionId}`);
       }
-      
+
       const iterator = claudeQuery(queryOptions);
       // Store query reference for mid-session controls (interrupt, rewind, info)
       setActiveQuery(iterator);
       clearTrackedMessages();
-      
+
       const currentMessages: SDKMessage[] = [];
       let currentResponse = "";
       let currentSessionId: string | undefined;
       let turnCount = 0;
-      
+
       for await (const message of iterator) {
         // Check AbortSignal to stop iteration
         if (controller.signal.aborted) {
           console.log(`Claude Code: Abort signal detected, stopping iteration`);
           break;
         }
-        
+
         currentMessages.push(message);
-        
+
         // For JSON streams, call dedicated callback
         if (onStreamJson) {
           onStreamJson(message);
         }
-        
+
         // For text messages, send chunks
         // Skip for JSON stream output as it's handled by onStreamJson
         if (message.type === 'assistant' && message.message.content && !onStreamJson) {
@@ -348,13 +371,13 @@ export async function sendToClaudeCode(
             // deno-lint-ignore no-explicit-any
             .map((c: any) => c.text)
             .join('');
-          
+
           if (textContent && onChunk) {
             onChunk(textContent);
           }
           currentResponse = textContent;
         }
-        
+
         // Track user message IDs for rewind (if checkpointing enabled)
         if (message.type === 'user' && 'message' in message && 'id' in message.message) {
           turnCount++;
@@ -364,16 +387,16 @@ export async function sendToClaudeCode(
             `Turn ${turnCount}`
           );
         }
-        
+
         // Save session information
         if ('session_id' in message && message.session_id) {
           currentSessionId = message.session_id;
         }
       }
-      
+
       // Clear active query when done
       setActiveQuery(null);
-      
+
       return {
         messages: currentMessages,
         response: currentResponse,
@@ -381,14 +404,14 @@ export async function sendToClaudeCode(
         aborted: controller.signal.aborted,
         modelUsed: modelToUse || "Default"
       };
-    // deno-lint-ignore no-explicit-any
+      // deno-lint-ignore no-explicit-any
     } catch (error: any) {
       // Clear active query on error
       setActiveQuery(null);
       // Properly handle process exit code 143 (SIGTERM) and AbortError
-      if (error.name === 'AbortError' || 
-          controller.signal.aborted || 
-          (error.message && error.message.includes('exited with code 143'))) {
+      if (error.name === 'AbortError' ||
+        controller.signal.aborted ||
+        (error.message && error.message.includes('exited with code 143'))) {
         console.log(`Claude Code: Process terminated by abort signal`);
         return {
           messages: [],
@@ -401,26 +424,26 @@ export async function sendToClaudeCode(
       throw error;
     }
   };
-  
+
   // First try with specified model (or default)
   try {
     const result = await executeWithErrorHandling();
-    
+
     if (result.aborted) {
       return { response: "Request was cancelled", modelUsed: result.modelUsed };
     }
-    
+
     messages.push(...result.messages);
     fullResponse = result.response;
     resultSessionId = result.sessionId;
     modelUsed = result.modelUsed;
-    
+
     // Get information from the last message
     const lastMessage = messages[messages.length - 1];
-    
+
     // Extract permission denials from result messages
     const permissionDenials = extractPermissionDenials(messages);
-    
+
     return {
       response: fullResponse || "No response received",
       sessionId: resultSessionId,
@@ -429,23 +452,23 @@ export async function sendToClaudeCode(
       modelUsed,
       ...(permissionDenials.length > 0 && { permissionDenials }),
     };
-  // deno-lint-ignore no-explicit-any
+    // deno-lint-ignore no-explicit-any
   } catch (error: any) {
     // For exit code 1 errors (rate limit), retry with Haiku (cheaper/faster fallback)
     if (error.message && (error.message.includes('exit code 1') || error.message.includes('exited with code 1'))) {
       console.log("Rate limit detected, retrying with Haiku (fast fallback)...");
-      
+
       try {
         const retryResult = await executeWithErrorHandling("haiku");
-        
+
         if (retryResult.aborted) {
           return { response: "Request was cancelled", modelUsed: retryResult.modelUsed };
         }
-        
+
         // Get information from the last message
         const lastRetryMessage = retryResult.messages[retryResult.messages.length - 1];
         const retryDenials = extractPermissionDenials(retryResult.messages);
-        
+
         return {
           response: retryResult.response || "No response received",
           sessionId: retryResult.sessionId,
@@ -454,20 +477,20 @@ export async function sendToClaudeCode(
           modelUsed: retryResult.modelUsed,
           ...(retryDenials.length > 0 && { permissionDenials: retryDenials }),
         };
-      // deno-lint-ignore no-explicit-any
+        // deno-lint-ignore no-explicit-any
       } catch (retryError: any) {
         // If Haiku fallback also fails
-        if (retryError.name === 'AbortError' || 
-            controller.signal.aborted || 
-            (retryError.message && retryError.message.includes('exited with code 143'))) {
+        if (retryError.name === 'AbortError' ||
+          controller.signal.aborted ||
+          (retryError.message && retryError.message.includes('exited with code 143'))) {
           return { response: "Request was cancelled", modelUsed: "Claude Haiku (fallback)" };
         }
-        
+
         retryError.message += '\n\n⚠️ Both default model and Haiku fallback encountered errors. Please wait a moment and try again.';
         throw retryError;
       }
     }
-    
+
     throw error;
   }
 }
