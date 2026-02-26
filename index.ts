@@ -58,39 +58,7 @@ async function loadEnvFile(): Promise<void> {
  * Build the prompt that gets sent to Claude Code when a user mentions the bot.
  * Includes Discord context metadata so Claude can use MCP tools to look up messages.
  */
-
-/** Map of media type to file extension */
-const MEDIA_TYPE_EXT: Record<string, string> = {
-  "image/jpeg": ".jpg",
-  "image/png": ".png",
-  "image/gif": ".gif",
-  "image/webp": ".webp",
-};
-
-/** Download an image from URL and save to workspace, returning the file path */
-async function downloadImageToFile(url: string, workDir: string, index: number): Promise<string | null> {
-  try {
-    const response = await fetch(url);
-    if (!response.ok) return null;
-
-    const contentType = (response.headers.get("content-type") || "image/png").split(";")[0].trim();
-    const ext = MEDIA_TYPE_EXT[contentType] || ".png";
-    const timestamp = Date.now();
-    const filename = `discord-image-${timestamp}-${index}${ext}`;
-    const filePath = `${workDir}/${filename}`;
-
-    const buffer = await response.arrayBuffer();
-    await Deno.writeFile(filePath, new Uint8Array(buffer));
-
-    console.log(`Saved image to: ${filePath} (${buffer.byteLength} bytes)`);
-    return filePath;
-  } catch (error) {
-    console.error(`Failed to download image: ${url}`, error);
-    return null;
-  }
-}
-
-function buildPrompt(userMessage: string, ctx: MentionContext, imagePaths?: string[]): string {
+function buildPrompt(userMessage: string, ctx: MentionContext): string {
   const parts: string[] = [];
 
   parts.push(`<discord-context>`);
@@ -101,18 +69,7 @@ function buildPrompt(userMessage: string, ctx: MentionContext, imagePaths?: stri
   parts.push(`Message ID: ${ctx.messageId}`);
   parts.push(`</discord-context>`);
   parts.push('');
-
-  if (imagePaths && imagePaths.length > 0) {
-    parts.push(`<attached-images>`);
-    parts.push(`ユーザーが${imagePaths.length}枚の画像を添付しました。以下のパスにあるので view_file ツールで確認してください：`);
-    for (const p of imagePaths) {
-      parts.push(`- ${p}`);
-    }
-    parts.push(`</attached-images>`);
-    parts.push('');
-  }
-
-  parts.push(userMessage || '（画像が添付されています。内容を確認してください）');
+  parts.push(userMessage);
 
   return parts.join('\n');
 }
@@ -196,21 +153,8 @@ if (import.meta.main) {
         try {
           const controller = new AbortController();
 
-          // Download image attachments to workspace (if any)
-          const imagePaths: string[] = [];
-          if (context.imageUrls.length > 0) {
-            console.log(`Downloading ${context.imageUrls.length} image(s) to workspace...`);
-            const results = await Promise.all(
-              context.imageUrls.map((url, i) => downloadImageToFile(url, workDir, i))
-            );
-            for (const p of results) {
-              if (p) imagePaths.push(p);
-            }
-            console.log(`Saved ${imagePaths.length} image(s) to workspace`);
-          }
-
-          // Build prompt with Discord context metadata and image paths
-          const fullPrompt = buildPrompt(prompt, context, imagePaths.length > 0 ? imagePaths : undefined);
+          // Build prompt with Discord context metadata
+          const fullPrompt = buildPrompt(prompt, context);
 
           // Get existing session for this channel (if any) for conversation continuity
           const existingSessionId = channelSessions.get(context.channelId);
