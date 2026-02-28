@@ -99,6 +99,13 @@ if (import.meta.main) {
     const bot = await createMentionBot(
       { discordToken, workDir },
       async (prompt, context, helpers) => {
+        // Reset command — clear session without calling Claude
+        if (prompt === "リセット" || prompt === "reset") {
+          channelSessions.delete(context.channelId);
+          await helpers.reply("✅ セッションをリセットしました！新しい会話を始められます🐶");
+          return;
+        }
+
         // Show typing indicator
         await helpers.sendTyping();
 
