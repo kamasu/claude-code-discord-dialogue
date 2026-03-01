@@ -131,8 +131,8 @@ export async function createMentionBot(
 
   // ---- Message handler ----
   client.on(Events.MessageCreate, async (message: Message) => {
-    // Ignore messages from bots (including self)
-    if (message.author.bot) return;
+    // Ignore own messages only — react to all other bots
+    if (client.user && message.author.id === client.user.id) return;
 
     // Only react when the bot is @mentioned
     if (!client.user || !message.mentions.has(client.user.id)) return;
@@ -141,11 +141,7 @@ export async function createMentionBot(
     const botMentionPattern = new RegExp(`<@!?${client.user.id}>`, "g");
     const prompt = message.content.replace(botMentionPattern, "").trim();
 
-    // If the message is just a mention with no text, ignore it
-    if (!prompt) {
-      await message.reply("何かメッセージを添えてメンションしてください！");
-      return;
-    }
+    // Empty mentions are allowed (confirmation mentions, follow-up mentions, etc.)
 
     // Build context metadata
     const context: MentionContext = {
