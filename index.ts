@@ -10,7 +10,7 @@
  */
 
 import { createMentionBot, type MentionContext } from "./discord/bot.ts";
-import { sendToClaudeCode, type ClaudeModelOptions } from "./claude/client.ts";
+import { sendToClaudeCode, type ClaudeModelOptions, type ThinkingConfig, type EffortLevel } from "./claude/client.ts";
 
 // ================================
 // .env Auto-Load
@@ -48,6 +48,28 @@ async function loadEnvFile(): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`Note: Could not load .env file: ${message}`);
   }
+}
+
+// ================================
+// Config Helpers
+// ================================
+
+/**
+ * Parse CLAUDE_THINKING env var into ThinkingConfig.
+ * Formats: "adaptive" | "disabled" | "enabled:10000" (with budgetTokens)
+ */
+function parseThinkingConfig(value?: string): ThinkingConfig | undefined {
+  if (!value) return undefined;
+  const v = value.trim().toLowerCase();
+  if (v === "adaptive") return { type: "adaptive" };
+  if (v === "disabled") return { type: "disabled" };
+  if (v.startsWith("enabled")) {
+    const parts = v.split(":");
+    const budget = parts[1] ? parseInt(parts[1], 10) : 10000;
+    return { type: "enabled", budgetTokens: isNaN(budget) ? 10000 : budget };
+  }
+  console.warn(`[Config] Unknown CLAUDE_THINKING value: "${value}", ignoring.`);
+  return undefined;
 }
 
 // ================================
@@ -176,8 +198,18 @@ if (import.meta.main) {
           const existingSessionId = channelSessions.get(context.channelId);
 
           // Model options — uses claude login auth (no API key needed)
+          // Model/thinking/effort are configurable via env vars:
+          //   CLAUDE_MODEL    (e.g. "claude-opus-4-6")
+          //   CLAUDE_THINKING (e.g. "adaptive", "disabled", "enabled:10000")
+          //   CLAUDE_EFFORT   (e.g. "low", "medium", "high", "max")
+          const claudeModel = Deno.env.get("CLAUDE_MODEL");
+          const claudeThinking = parseThinkingConfig(Deno.env.get("CLAUDE_THINKING"));
+          const claudeEffort = Deno.env.get("CLAUDE_EFFORT") as EffortLevel | undefined;
           const modelOptions: ClaudeModelOptions = {
             permissionMode: "bypassPermissions",
+            ...(claudeModel && { model: claudeModel }),
+            ...(claudeThinking && { thinking: claudeThinking }),
+            ...(claudeEffort && { effort: claudeEffort }),
           };
 
           // onStreamJson callback — update progress message with rich details
