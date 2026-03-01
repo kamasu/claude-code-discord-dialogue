@@ -101,7 +101,7 @@ if (import.meta.main) {
       async (prompt, context, helpers) => {
         // Reset command — clear session without calling Claude
         if (prompt === "リセット" || prompt === "reset") {
-          channelSessions.delete(context.channelId);
+          channelSessions.clear();
           await helpers.reply("✅ セッションをリセットしました！新しい会話を始められます🐶");
           return;
         }
