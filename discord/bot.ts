@@ -26,6 +26,8 @@ export interface MentionBotConfig {
  * Helpers provided to the mention handler for Discord interaction.
  */
 export interface MentionHelpers {
+  /** Add an emoji reaction to the original message */
+  addReaction: (emoji: string) => Promise<void>;
   /** Send a reply to the original message (with @mention for notification) */
   reply: (text: string) => Promise<void>;
   /** Show typing indicator in the channel */
@@ -153,6 +155,15 @@ export async function createMentionBot(
       messageId: message.id,
     };
 
+    // Reaction helper: add emoji reaction to the original message
+    const addReaction = async (emoji: string) => {
+      try {
+        await message.react(emoji);
+      } catch {
+        // Ignore reaction errors
+      }
+    };
+
     // Reply helper: sends a reply with @mention for notification, splitting if over 2000 chars
     const reply = async (text: string) => {
       if (!text) return;
@@ -247,6 +258,7 @@ export async function createMentionBot(
 
     // Build helpers object
     const helpers: MentionHelpers = {
+      addReaction,
       reply,
       sendTyping,
       sendProgress,

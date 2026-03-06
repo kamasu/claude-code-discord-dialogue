@@ -338,9 +338,19 @@ if (import.meta.main) {
               await helpers.deleteProgress(progressMsg);
             }
 
-            // Reply with the final response (as a reply with @mention)
+            // Check for reaction-only marker from Claude
             const response = result.response || "応答がありませんでした。";
-            await helpers.reply(response);
+            const reactionMatch = response.trim().match(/\[REACTION_ONLY:(.+?)\]/);
+            if (reactionMatch) {
+              // React with emoji only, no text reply
+              const emojis = reactionMatch[1].split(",");
+              for (const emoji of emojis) {
+                await helpers.addReaction(emoji.trim());
+              }
+            } else {
+              // Reply with the final response (as a reply with @mention)
+              await helpers.reply(response);
+            }
           }
 
         } finally {
