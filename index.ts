@@ -143,7 +143,7 @@ if (import.meta.main) {
         // deno-lint-ignore no-explicit-any
         let progressMsg: any = null;
         try {
-          progressMsg = await helpers.sendProgressWithCancel("はい、確認します！🐶", cancelId);
+          progressMsg = await helpers.sendProgressWithCancel("ワン！確認します🐶", cancelId);
         } catch {
           // Ignore if progress message fails
         }
