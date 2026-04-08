@@ -241,7 +241,8 @@ if (import.meta.main) {
                 const postIdSuffix = `post-${context.messageId}-${Date.now()}`;
                 const postCancelId = `cancel-${postIdSuffix}`;
                 try {
-                  postProgressMsg = await helpers.sendProgress("📝 追加指示を処理中ワン！🐶");
+                  const truncatedText = text.length > 100 ? text.substring(0, 100) + '…' : text;
+                  postProgressMsg = await helpers.sendProgress(`📝 追加指示を処理中ワン！🐶\n> ${truncatedText}`);
                 } catch { /* ignore */ }
 
                 try {
@@ -449,7 +450,7 @@ if (import.meta.main) {
           };
 
           // Helper: drain queued instructions, update log messages, build combined prompt
-          const drainInstructions = (): string => {
+          const drainInstructions = (): { prompt: string; summary: string } => {
             const toProcess = additionalInstructions.splice(0);
             // Update log messages to "送信済"
             for (const instr of toProcess) {
@@ -466,7 +467,10 @@ if (import.meta.main) {
                 return `${prefix}: ${instr.text}`;
               })
               .join('\n');
-            return buildPrompt(combined, context);
+            // Build summary of instruction texts for display
+            const summary = toProcess.map(instr => instr.text).join(' / ');
+            const truncatedSummary = summary.length > 100 ? summary.substring(0, 100) + '…' : summary;
+            return { prompt: buildPrompt(combined, context), summary: truncatedSummary };
           };
 
           // ===== MAIN PROCESSING LOOP =====
@@ -510,12 +514,13 @@ if (import.meta.main) {
             if (wasInterrupted && additionalInstructions.length > 0 && currentSessionId) {
               // Don't send partial response, don't delete progress
               // Drain instructions and resume session
-              currentPrompt = drainInstructions();
+              const drained = drainInstructions();
+              currentPrompt = drained.prompt;
 
               // Update progress message
               if (progressMsg) {
                 helpers.editProgressWithButtons(
-                  progressMsg, "📝 追加指示を処理中ワン！🐶", cancelId, instructionId
+                  progressMsg, `📝 追加指示を処理中ワン！🐶\n> ${drained.summary}`, cancelId, instructionId
                 ).catch(() => {});
               }
 
@@ -536,7 +541,8 @@ if (import.meta.main) {
             // Check if instructions arrived at completion (race window)
             if (additionalInstructions.length > 0 && currentSessionId) {
               // Drain instructions and continue
-              currentPrompt = drainInstructions();
+              const drained = drainInstructions();
+              currentPrompt = drained.prompt;
 
               // New progress message for follow-up
               const followUpIdSuffix = `followup-${context.messageId}-${Date.now()}`;
@@ -544,7 +550,7 @@ if (import.meta.main) {
               const followUpInstructionId = `instruction-${followUpIdSuffix}`;
               try {
                 progressMsg = await helpers.sendProgressWithButtons(
-                  "📝 追加指示を処理中ワン！🐶",
+                  `📝 追加指示を処理中ワン！🐶\n> ${drained.summary}`,
                   followUpCancelId,
                   followUpInstructionId,
                 );

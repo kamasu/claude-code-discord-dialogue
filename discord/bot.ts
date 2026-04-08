@@ -139,10 +139,8 @@ export async function createMentionBot(
             callback(text.trim(), modalInteraction.user.id, modalInteraction.user.username);
           }
           try {
-            await modalInteraction.reply({ content: '📝 追加指示を受け付けました！', ephemeral: true });
-          } catch {
-            try { await modalInteraction.deferUpdate(); } catch { /* ignore */ }
-          }
+            await modalInteraction.deferUpdate();
+          } catch { /* ignore */ }
         } else {
           // Callback not found — processing already completed
           try {
