@@ -11,6 +11,7 @@
 
 import { createMentionBot, type MentionContext } from "./discord/bot.ts";
 import { sendToClaudeCode, type ClaudeModelOptions, type ThinkingConfig, type EffortLevel } from "./claude/client.ts";
+import { interruptActiveQuery } from "./claude/query-manager.ts";
 
 // ================================
 // .env Auto-Load
@@ -143,7 +144,10 @@ if (import.meta.main) {
         let instructionId = `instruction-${idSuffix}`;
 
         // Queue for additional instructions received during processing
-        const additionalInstructions: Array<{ text: string; userId: string; username: string }> = [];
+        // deno-lint-ignore no-explicit-any
+        const additionalInstructions: Array<{ text: string; userId: string; username: string; logMessage: any }> = [];
+        let shouldInterrupt = false;  // Flag: interrupt requested, will fire at next onStreamJson
+        let interruptTriggered = false;  // Debounce: only call interrupt once per query iteration
 
         // Send initial progress message with "追加指示" and "キャンセル" buttons
         // deno-lint-ignore no-explicit-any
@@ -190,6 +194,12 @@ if (import.meta.main) {
           }
         };
 
+        // Track whether processing is complete (for post-completion instruction handling)
+        let processingComplete = false;
+        // Track the last response message sent by inu (for post-completion reply target)
+        // deno-lint-ignore no-explicit-any
+        let lastResponseMsg: any = null;
+
         try {
           const controller = new AbortController();
 
@@ -199,18 +209,101 @@ if (import.meta.main) {
             controller.abort();
           });
 
-          // Register instruction callback: modal submit or reply → queue additional instruction
-          if (progressMsgId) {
-            helpers.registerInstructionCallback(instructionId, progressMsgId, (text, userId, username) => {
-              additionalInstructions.push({ text, userId, username });
-              console.log(`[AdditionalInstruction] Queued from ${username}: ${text.substring(0, 80)}...`);
+          // Instruction callback: modal submit or reply → queue + log + set interrupt flag
+          const instructionCallback = (text: string, userId: string, username: string) => {
+            // Push synchronously so the main loop sees it immediately
+            // deno-lint-ignore no-explicit-any
+            const entry = { text, userId, username, logMessage: null as any };
+            additionalInstructions.push(entry);
+            console.log(`[AdditionalInstruction] Queued from ${username}: ${text.substring(0, 80)}...`);
+
+            if (processingComplete) {
+              // ---- POST-COMPLETION: handle as a new request ----
+              (async () => {
+                // Post log reply → immediately mark as 送信済
+                try {
+                  entry.logMessage = await helpers.sendReplyToOriginal(
+                    `📝 **追加指示 (送信済 ✅):**\n${text}`
+                  );
+                } catch { /* ignore */ }
+
+                // Process as new request in the same session
+                const currentSessionId = channelSessions.get(context.channelId);
+                const instrPrompt = buildPrompt(
+                  `追加指示 (from ${username}): ${text}`,
+                  context,
+                );
+
+                // Show typing and new progress
+                await helpers.sendTyping();
+                // deno-lint-ignore no-explicit-any
+                let postProgressMsg: any = null;
+                const postIdSuffix = `post-${context.messageId}-${Date.now()}`;
+                const postCancelId = `cancel-${postIdSuffix}`;
+                try {
+                  postProgressMsg = await helpers.sendProgress("📝 追加指示を処理中ワン！🐶");
+                } catch { /* ignore */ }
+
+                try {
+                  const postResult = await sendToClaudeCode(
+                    workDir,
+                    instrPrompt,
+                    new AbortController(),
+                    currentSessionId,
+                    undefined,
+                    undefined,  // No streaming progress for post-completion
+                    false,
+                    modelOptions,
+                  );
+
+                  if (postResult.sessionId) {
+                    channelSessions.set(context.channelId, postResult.sessionId);
+                  }
+                  if (postProgressMsg) await helpers.deleteProgress(postProgressMsg);
+
+                  if (postResult.response && postResult.response !== "Request was cancelled") {
+                    // Reply to inu's last response (not the original user message)
+                    if (lastResponseMsg) {
+                      await helpers.replyToMessage(lastResponseMsg, postResult.response);
+                    } else {
+                      await helpers.reply(postResult.response);
+                    }
+                  }
+                } catch (err) {
+                  console.error("[AdditionalInstruction] Post-completion failed:", err);
+                  if (postProgressMsg) await helpers.deleteProgress(postProgressMsg);
+                  await helpers.reply(
+                    `追加指示の処理中にエラーが発生しました: ${err instanceof Error ? err.message : "Unknown error"}`
+                  );
+                }
+              })();
+              return;
+            }
+
+            // ---- DURING PROCESSING: queue + log + set interrupt flag ----
+            // Set flag for onStreamJson to trigger interrupt at turn boundary
+            shouldInterrupt = true;
+
+            // Fire-and-forget: post visible log message
+            (async () => {
+              try {
+                entry.logMessage = await helpers.sendReplyToOriginal(
+                  `📝 **追加指示 (処理待ち):**\n${text}`
+                );
+              } catch { /* ignore */ }
+
               // Update progress to show receipt confirmation
               if (progressMsg) {
                 const count = additionalInstructions.length;
-                const notice = `\n\n📝 追加指示を${count}件受け付けました！処理完了後に続行します。`;
+                const notice = `\n\n📝 追加指示を${count}件受け付けました！次の区切りで処理します。`;
                 helpers.editProgressWithButtons(progressMsg, `🐶 処理中...${notice}`, cancelId, instructionId).catch(() => {});
               }
-            });
+            })();
+          };
+
+          // Register instruction callback
+          if (progressMsgId) {
+            helpers.registerInstructionCallback(instructionId, progressMsgId, instructionCallback);
           }
 
           // Build prompt with Discord context metadata
@@ -220,10 +313,6 @@ if (import.meta.main) {
           const existingSessionId = channelSessions.get(context.channelId);
 
           // Model options — uses claude login auth (no API key needed)
-          // Model/thinking/effort are configurable via env vars:
-          //   CLAUDE_MODEL    (e.g. "claude-opus-4-6")
-          //   CLAUDE_THINKING (e.g. "adaptive", "disabled", "enabled:10000")
-          //   CLAUDE_EFFORT   (e.g. "low", "medium", "high", "max")
           const claudeModel = Deno.env.get("CLAUDE_MODEL");
           const claudeThinking = parseThinkingConfig(Deno.env.get("CLAUDE_THINKING"));
           const claudeEffort = Deno.env.get("CLAUDE_EFFORT") as EffortLevel | undefined;
@@ -234,10 +323,24 @@ if (import.meta.main) {
             ...(claudeEffort && { effort: claudeEffort }),
           };
 
-          // onStreamJson callback — update progress message with rich details
+          // onStreamJson callback — update progress + interrupt at turn boundaries
+          let wasInterrupted = false;
           // deno-lint-ignore no-explicit-any
           const onStreamJson = (message: any) => {
             try {
+              // ---- INTERRUPT CHECK at turn boundaries ----
+              if (shouldInterrupt && !interruptTriggered) {
+                interruptTriggered = true;
+                interruptActiveQuery().then(success => {
+                  if (success) {
+                    wasInterrupted = true;
+                    console.log(`[AdditionalInstruction] Interrupt triggered at turn boundary (type=${message.type})`);
+                  } else {
+                    console.log(`[AdditionalInstruction] Interrupt failed (query may have completed)`);
+                  }
+                }).catch(() => {});
+              }
+
               if (message.type === 'assistant' && message.message?.content) {
                 // deno-lint-ignore no-explicit-any
                 const content = message.message.content as any[];
@@ -325,136 +428,169 @@ if (import.meta.main) {
           const truncate = (s: string, max: number): string =>
             s.length > max ? s.substring(0, max) + '...' : s;
 
-          // Call Claude Code with streaming progress
-          const result = await sendToClaudeCode(
-            workDir,
-            fullPrompt,
-            controller,
-            existingSessionId,
-            undefined,     // onChunk — not needed, we use onStreamJson
-            onStreamJson,  // streaming progress updates
-            false,         // continueMode
-            modelOptions,
-          );
-
-          // Store session ID for conversation continuity
-          if (result.sessionId) {
-            channelSessions.set(context.channelId, result.sessionId);
-          }
-
-          // Cancel any pending debounced edit
-          if (pendingEditTimer) clearTimeout(pendingEditTimer);
-
-          // Clean up cancel & instruction callbacks
-          helpers.unregisterCancel(cancelId);
-          if (progressMsgId) helpers.unregisterInstructionCallback(instructionId, progressMsgId);
-
           // Helper: send response (handles REACTION_ONLY pattern)
-          const sendResponse = async (response: string) => {
+          // If replyTarget is provided, replies to that message instead of the original
+          // Returns the sent Message (or null for reactions)
+          // deno-lint-ignore no-explicit-any
+          const sendResponse = async (response: string, replyTarget?: any): Promise<any> => {
             const reactionMatch = response.trim().match(/\[REACTION_ONLY:(.+?)\]/);
             if (reactionMatch) {
               const emojis = reactionMatch[1].split(",");
               for (const emoji of emojis) {
                 await helpers.addReaction(emoji.trim());
               }
+              return null;
+            } else if (replyTarget) {
+              await helpers.replyToMessage(replyTarget, response);
+              return null; // replyToMessage doesn't return message
             } else {
-              await helpers.reply(response);
+              return await helpers.replyAndReturn(response);
             }
           };
 
-          // Check if the request was cancelled
-          if (result.response === "Request was cancelled") {
-            if (progressMsg) await helpers.deleteProgress(progressMsg);
-          } else if (additionalInstructions.length > 0 && result.sessionId) {
-            // ---- AUTO-CONTINUE: additional instructions queued ----
-
-            // Send the original response first
-            if (progressMsg) await helpers.deleteProgress(progressMsg);
-            await sendResponse(result.response || "応答がありませんでした。");
-
-            // Build combined prompt from queued instructions
-            const combined = additionalInstructions
+          // Helper: drain queued instructions, update log messages, build combined prompt
+          const drainInstructions = (): string => {
+            const toProcess = additionalInstructions.splice(0);
+            // Update log messages to "送信済"
+            for (const instr of toProcess) {
+              if (instr.logMessage) {
+                helpers.editMessage(instr.logMessage, `📝 **追加指示 (送信済 ✅):**\n${instr.text}`).catch(() => {});
+              }
+            }
+            // Build combined prompt
+            const combined = toProcess
               .map((instr, i) => {
-                const prefix = additionalInstructions.length === 1
+                const prefix = toProcess.length === 1
                   ? `追加指示 (from ${instr.username})`
                   : `追加指示${i + 1} (from ${instr.username})`;
                 return `${prefix}: ${instr.text}`;
               })
               .join('\n');
-            const followUpPrompt = buildPrompt(combined, context);
+            return buildPrompt(combined, context);
+          };
 
-            // New progress message for follow-up
-            const followUpIdSuffix = `followup-${context.messageId}-${Date.now()}`;
-            const followUpCancelId = `cancel-${followUpIdSuffix}`;
-            const followUpInstructionId = `instruction-${followUpIdSuffix}`;
-            // deno-lint-ignore no-explicit-any
-            let followUpProgressMsg: any = null;
-            try {
-              followUpProgressMsg = await helpers.sendProgressWithButtons(
-                "📝 追加指示を処理中ワン！🐶",
-                followUpCancelId,
-                followUpInstructionId,
-              );
-            } catch { /* ignore */ }
+          // ===== MAIN PROCESSING LOOP =====
+          let currentPrompt = fullPrompt;
+          let currentSessionId = existingSessionId;
 
-            const followUpController = new AbortController();
-            helpers.registerCancel(followUpCancelId, () => {
-              console.log(`[Cancel] User cancelled follow-up: ${followUpCancelId}`);
-              followUpController.abort();
-            });
+          while (true) {
+            // Reset interrupt state for this iteration
+            wasInterrupted = false;
+            shouldInterrupt = false;
+            interruptTriggered = false;
 
-            // Re-point closure variables for updateProgress to work with follow-up
-            lastEditTime = 0;
-            pendingEditText = null;
-            if (pendingEditTimer) clearTimeout(pendingEditTimer);
-            progressMsg = followUpProgressMsg;
-            cancelId = followUpCancelId;
-            instructionId = followUpInstructionId;
+            // Call Claude Code with streaming progress
+            const result = await sendToClaudeCode(
+              workDir,
+              currentPrompt,
+              controller,
+              currentSessionId,
+              undefined,     // onChunk — not needed, we use onStreamJson
+              onStreamJson,  // streaming progress updates
+              false,         // continueMode
+              modelOptions,
+            );
 
-            try {
-              const followUpResult = await sendToClaudeCode(
-                workDir,
-                followUpPrompt,
-                followUpController,
-                result.sessionId,
-                undefined,
-                onStreamJson,
-                false,
-                modelOptions,
-              );
-
-              if (followUpResult.sessionId) {
-                channelSessions.set(context.channelId, followUpResult.sessionId);
-              }
-              if (pendingEditTimer) clearTimeout(pendingEditTimer);
-              helpers.unregisterCancel(followUpCancelId);
-
-              if (followUpProgressMsg) await helpers.deleteProgress(followUpProgressMsg);
-
-              if (followUpResult.response === "Request was cancelled") {
-                // Follow-up was cancelled — nothing more to do
-              } else {
-                await sendResponse(followUpResult.response || "追加指示の処理が完了しました。");
-              }
-            } catch (followUpError) {
-              console.error("[AdditionalInstruction] Follow-up failed:", followUpError);
-              helpers.unregisterCancel(followUpCancelId);
-              if (followUpProgressMsg) await helpers.deleteProgress(followUpProgressMsg);
-              await helpers.reply(
-                `追加指示の処理中にエラーが発生しました: ${followUpError instanceof Error ? followUpError.message : "Unknown error"}`
-              );
+            // Store session ID for conversation continuity
+            if (result.sessionId) {
+              channelSessions.set(context.channelId, result.sessionId);
+              currentSessionId = result.sessionId;
             }
-          } else {
-            // ---- Normal completion (no additional instructions) ----
+
+            // Cancel any pending debounced edit
+            if (pendingEditTimer) clearTimeout(pendingEditTimer);
+
+            // Check if the request was cancelled
+            if (result.response === "Request was cancelled") {
+              if (progressMsg) await helpers.deleteProgress(progressMsg);
+              break;
+            }
+
+            // ---- INTERRUPTED PATH: interrupt fired, instructions pending ----
+            if (wasInterrupted && additionalInstructions.length > 0 && currentSessionId) {
+              // Don't send partial response, don't delete progress
+              // Drain instructions and resume session
+              currentPrompt = drainInstructions();
+
+              // Update progress message
+              if (progressMsg) {
+                helpers.editProgressWithButtons(
+                  progressMsg, "📝 追加指示を処理中ワン！🐶", cancelId, instructionId
+                ).catch(() => {});
+              }
+
+              // Reset debounce state for next iteration
+              lastEditTime = 0;
+              pendingEditText = null;
+
+              continue; // Back to top of loop
+            }
+
+            // ---- NATURAL COMPLETION PATH ----
+            // Delete progress and send the response
             if (progressMsg) await helpers.deleteProgress(progressMsg);
-            await sendResponse(result.response || "応答がありませんでした。");
+            progressMsg = null;
+            const sentMsg = await sendResponse(result.response || "応答がありませんでした。");
+            if (sentMsg) lastResponseMsg = sentMsg;
+
+            // Check if instructions arrived at completion (race window)
+            if (additionalInstructions.length > 0 && currentSessionId) {
+              // Drain instructions and continue
+              currentPrompt = drainInstructions();
+
+              // New progress message for follow-up
+              const followUpIdSuffix = `followup-${context.messageId}-${Date.now()}`;
+              const followUpCancelId = `cancel-${followUpIdSuffix}`;
+              const followUpInstructionId = `instruction-${followUpIdSuffix}`;
+              try {
+                progressMsg = await helpers.sendProgressWithButtons(
+                  "📝 追加指示を処理中ワン！🐶",
+                  followUpCancelId,
+                  followUpInstructionId,
+                );
+                progressMsgId = progressMsg?.id || null;
+              } catch { /* ignore */ }
+
+              // Re-register callbacks with new IDs
+              cancelId = followUpCancelId;
+              instructionId = followUpInstructionId;
+              helpers.registerCancel(cancelId, () => {
+                console.log(`[Cancel] User cancelled follow-up: ${cancelId}`);
+                controller.abort();
+              });
+              if (progressMsgId) {
+                helpers.registerInstructionCallback(instructionId, progressMsgId, instructionCallback);
+              }
+
+              // Reset debounce state
+              lastEditTime = 0;
+              pendingEditText = null;
+
+              continue; // Back to top of loop
+            }
+
+            // No more instructions — done
+            break;
           }
+
+          // ===== POST-COMPLETION: keep callbacks alive for late instructions =====
+          processingComplete = true;
+
+          // Keep callbacks registered for 2 minutes for post-completion instructions.
+          // The instructionCallback checks processingComplete and handles them as new requests.
+          setTimeout(() => {
+            helpers.unregisterCancel(cancelId);
+            if (progressMsgId) helpers.unregisterInstructionCallback(instructionId, progressMsgId);
+          }, 2 * 60 * 1000);
 
         } finally {
           clearInterval(typingInterval);
           if (pendingEditTimer) clearTimeout(pendingEditTimer);
-          helpers.unregisterCancel(cancelId);
-          if (progressMsgId) helpers.unregisterInstructionCallback(instructionId, progressMsgId);
+          // Note: if processingComplete, callbacks are cleaned up by the 2-minute timeout
+          if (!processingComplete) {
+            helpers.unregisterCancel(cancelId);
+            if (progressMsgId) helpers.unregisterInstructionCallback(instructionId, progressMsgId);
+          }
         }
       },
     );

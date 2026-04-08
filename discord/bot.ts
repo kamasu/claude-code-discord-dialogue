@@ -59,6 +59,14 @@ export interface MentionHelpers {
   registerInstructionCallback: (instructionId: string, progressMsgId: string, callback: InstructionCallback) => void;
   /** Unregister an instruction callback. */
   unregisterInstructionCallback: (instructionId: string, progressMsgId: string) => void;
+  /** Send a reply to the original message without @mention (for logging). Returns the sent Message. */
+  sendReplyToOriginal: (text: string) => Promise<Message>;
+  /** Edit an existing message's content. */
+  editMessage: (msg: Message, text: string) => Promise<void>;
+  /** Send a reply to a specific message (with @mention for notification). */
+  replyToMessage: (targetMsg: Message, text: string) => Promise<void>;
+  /** Send a reply to the original message (with @mention) and return the first sent Message. */
+  replyAndReturn: (text: string) => Promise<Message | null>;
 }
 
 /**
@@ -130,11 +138,18 @@ export async function createMentionBot(
           if (text?.trim()) {
             callback(text.trim(), modalInteraction.user.id, modalInteraction.user.username);
           }
-        }
-        try {
-          await modalInteraction.reply({ content: '📝 追加指示を受け付けました！処理完了後に続行します。', ephemeral: true });
-        } catch {
-          try { await modalInteraction.deferUpdate(); } catch { /* ignore */ }
+          try {
+            await modalInteraction.reply({ content: '📝 追加指示を受け付けました！', ephemeral: true });
+          } catch {
+            try { await modalInteraction.deferUpdate(); } catch { /* ignore */ }
+          }
+        } else {
+          // Callback not found — processing already completed
+          try {
+            await modalInteraction.reply({ content: '⚠️ 処理は既に完了しています。新しいメッセージで指示してください。', ephemeral: true });
+          } catch {
+            try { await modalInteraction.deferUpdate(); } catch { /* ignore */ }
+          }
         }
       }
       return;
@@ -360,6 +375,67 @@ export async function createMentionBot(
       replyCallbacks.delete(progressMsgId);
     };
 
+    // Send a reply to the original message without @mention (for logging purposes)
+    const sendReplyToOriginal = async (text: string): Promise<Message> => {
+      return await message.reply({
+        content: text,
+        allowedMentions: { repliedUser: false },
+      });
+    };
+
+    // Edit an existing message's content
+    const editMessage = async (msg: Message, text: string): Promise<void> => {
+      try {
+        await msg.edit(text);
+      } catch {
+        // Ignore edit errors (message may have been deleted)
+      }
+    };
+
+    // Send a reply to a specific message (with @mention for notification, splitting if needed)
+    const replyToMessage = async (targetMsg: Message, text: string): Promise<void> => {
+      if (!text) return;
+      const mentionPrefix = `<@${message.author.id}> `;
+      const firstChunkLimit = 2000 - mentionPrefix.length;
+      const chunks = splitMessage(text, 2000);
+      for (let i = 0; i < chunks.length; i++) {
+        if (i === 0) {
+          const content = chunks[i].length <= firstChunkLimit
+            ? mentionPrefix + chunks[i]
+            : mentionPrefix + chunks[i].substring(0, firstChunkLimit);
+          await targetMsg.reply(content);
+          if (chunks[i].length > firstChunkLimit) {
+            await message.channel.send(chunks[i].substring(firstChunkLimit));
+          }
+        } else {
+          await message.channel.send(chunks[i]);
+        }
+      }
+    };
+
+    // Reply to original message with @mention, returns the first sent Message
+    const replyAndReturn = async (text: string): Promise<Message | null> => {
+      if (!text) return null;
+      const mentionPrefix = `<@${message.author.id}> `;
+      const firstChunkLimit = 2000 - mentionPrefix.length;
+      const chunks = splitMessage(text, 2000);
+      let firstMsg: Message | null = null;
+      for (let i = 0; i < chunks.length; i++) {
+        if (i === 0) {
+          const content = chunks[i].length <= firstChunkLimit
+            ? mentionPrefix + chunks[i]
+            : mentionPrefix + chunks[i].substring(0, firstChunkLimit);
+          firstMsg = await message.reply(content);
+          if (chunks[i].length > firstChunkLimit) {
+            await message.channel.send(chunks[i].substring(firstChunkLimit));
+          }
+        } else {
+          await message.channel.send(chunks[i]);
+        }
+      }
+      return firstMsg;
+    };
+
     // Build helpers object
     const helpers: MentionHelpers = {
       addReaction,
@@ -377,6 +453,10 @@ export async function createMentionBot(
       editProgressWithButtons,
       registerInstructionCallback,
       unregisterInstructionCallback,
+      sendReplyToOriginal,
+      editMessage,
+      replyToMessage,
+      replyAndReturn,
     };
 
     // Call the handler
