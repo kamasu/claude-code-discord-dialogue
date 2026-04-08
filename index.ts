@@ -165,12 +165,14 @@ if (import.meta.main) {
         let pendingEditText: string | null = null;
         let pendingEditTimer: ReturnType<typeof setTimeout> | null = null;
         const EDIT_DEBOUNCE_MS = 2000;
+        let lastProgressText = "🐶 処理中...";
 
         const updateProgress = (rawText: string) => {
           if (!progressMsg) return;
 
           // Cap at 1500 chars to stay within Discord's 2000-char limit
           const text = rawText.length > 1500 ? rawText.substring(0, 1500) + '...' : rawText;
+          lastProgressText = text;
 
           const now = Date.now();
           const timeSinceLastEdit = now - lastEditTime;
@@ -297,7 +299,7 @@ if (import.meta.main) {
               if (progressMsg) {
                 const count = additionalInstructions.length;
                 const notice = `\n\n📝 追加指示を${count}件受け付けました！次の区切りで処理します。`;
-                helpers.editProgressWithButtons(progressMsg, `🐶 処理中...${notice}`, cancelId, instructionId).catch(() => {});
+                helpers.editProgressWithButtons(progressMsg, `${lastProgressText}${notice}`, cancelId, instructionId).catch(() => {});
               }
             })();
           };
