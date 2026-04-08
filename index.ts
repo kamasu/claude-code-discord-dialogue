@@ -355,7 +355,7 @@ if (import.meta.main) {
                   return;
                 }
 
-                // Check for tool_use blocks → show tool name + input summary
+                // Check for tool_use blocks → show friendly status message
                 // deno-lint-ignore no-explicit-any
                 const toolUses = content.filter((c: any) => c.type === 'tool_use');
                 if (toolUses.length > 0) {
@@ -367,9 +367,10 @@ if (import.meta.main) {
                   // Extract a meaningful summary from tool input
                   const input = lastTool.input || {};
                   const inputSummary = summarizeToolInput(toolName, input);
+                  const friendly = getFriendlyToolMessage(toolName);
                   const line = inputSummary
-                    ? `🐶 ${toolName} を調べてるワン！\n${inputSummary}`
-                    : `🐶 ${toolName} をフェッチ中ワン！`;
+                    ? `🐶 ${friendly}\n${inputSummary}`
+                    : `🐶 ${friendly}`;
                   updateProgress(line);
                   return;
                 }
@@ -393,6 +394,107 @@ if (import.meta.main) {
             } catch {
               // Ignore progress update errors
             }
+          };
+
+          // Map tool names to friendly Japanese messages
+          const friendlyToolMessages: Record<string, string> = {
+            // Built-in tools
+            'Bash': 'コマンドを実行してるワン！',
+            'Read': 'ファイルを読んでるワン！',
+            'Write': 'ファイルを書いてるワン！',
+            'Edit': 'ファイルを編集してるワン！',
+            'Grep': 'コードを検索してるワン！',
+            'Glob': 'ファイルを探してるワン！',
+            'WebFetch': 'Webページを取得してるワン！',
+            'WebSearch': 'Web検索してるワン！',
+            'Task': 'サブタスクを実行してるワン！',
+            'NotebookEdit': 'ノートブックを編集してるワン！',
+            'AskUserQuestion': 'ユーザーに確認してるワン！',
+            'EnterPlanMode': '計画を立ててるワン！',
+            'ExitPlanMode': '計画がまとまったワン！',
+            'TaskCreate': 'タスクを作成してるワン！',
+            'TaskUpdate': 'タスクを更新してるワン！',
+            'TaskGet': 'タスクを確認してるワン！',
+            'TaskList': 'タスク一覧を確認してるワン！',
+            'Skill': 'スキルを実行してるワン！',
+            'ToolSearch': 'ツールを探してるワン！',
+            'EnterWorktree': 'ワークツリーを準備してるワン！',
+            // Discord MCP tools
+            'discord read messages': 'Discordのメッセージを読んでるワン！',
+            'discord search messages': 'Discordのメッセージを検索してるワン！',
+            'discord send': 'ファイルを送信してるワン！',
+            'discord add reaction': 'リアクションをつけてるワン！',
+            'discord add multiple reactions': 'リアクションをつけてるワン！',
+            'discord remove reaction': 'リアクションを外してるワン！',
+            'discord get server info': 'サーバー情報を確認してるワン！',
+            'discord get forum channels': 'フォーラムを確認してるワン！',
+            'discord get forum post': 'フォーラム投稿を読んでるワン！',
+            'discord list forum threads': 'フォーラムスレッド一覧を取得してるワン！',
+            // Notion MCP tools
+            'notion search': 'Notionを検索してるワン！',
+            'notion fetch': 'Notionからデータを取得してるワン！',
+            'notion create pages': 'Notionページを作成してるワン！',
+            'notion update page': 'Notionページを更新してるワン！',
+            'notion get comments': 'Notionのコメントを読んでるワン！',
+            'notion create comment': 'Notionにコメントしてるワン！',
+            'notion create database': 'Notionデータベースを作成してるワン！',
+            'notion get users': 'Notionのユーザーを確認してるワン！',
+            'notion get teams': 'Notionのチームを確認してるワン！',
+            'notion create view': 'Notionビューを作成してるワン！',
+            'notion update view': 'Notionビューを更新してるワン！',
+            'notion duplicate page': 'Notionページを複製してるワン！',
+            'notion move pages': 'Notionページを移動してるワン！',
+            'notion update data source': 'Notionデータソースを更新してるワン！',
+            // Notion (non-claude_ai) MCP tools
+            'API post search': 'Notionを検索してるワン！',
+            'API retrieve a database': 'Notionデータベースを確認してるワン！',
+            'API query data source': 'Notionを検索してるワン！',
+            'API retrieve a page': 'Notionページを読んでるワン！',
+            'API patch page': 'Notionページを更新してるワン！',
+            'API post page': 'Notionページを作成してるワン！',
+            'API retrieve a block': 'Notionブロックを読んでるワン！',
+            'API get block children': 'Notionの中身を読んでるワン！',
+            'API update a block': 'Notionブロックを更新してるワン！',
+            'API delete a block': 'Notionブロックを削除してるワン！',
+            'API patch block children': 'Notionブロックを更新してるワン！',
+            'API retrieve a comment': 'Notionコメントを読んでるワン！',
+            'API create a comment': 'Notionにコメントしてるワン！',
+            'API get self': 'Notion接続を確認してるワン！',
+            'API get user': 'Notionユーザーを確認してるワン！',
+            'API get users': 'Notionユーザー一覧を取得してるワン！',
+            'API move page': 'Notionページを移動してるワン！',
+            'API retrieve a page property': 'Notionプロパティを確認してるワン！',
+            // Google Sheets MCP tools
+            'sheets get values': 'スプレッドシートを読んでるワン！',
+            'sheets update values': 'スプレッドシートを更新してるワン！',
+            'sheets batch get values': 'スプレッドシートをまとめて読んでるワン！',
+            'sheets batch update values': 'スプレッドシートをまとめて更新してるワン！',
+            'sheets append values': 'スプレッドシートに追記してるワン！',
+            'sheets clear values': 'スプレッドシートをクリアしてるワン！',
+            'sheets get metadata': 'スプレッドシート情報を確認してるワン！',
+            'sheets create spreadsheet': 'スプレッドシートを作成してるワン！',
+            'sheets insert sheet': 'シートを追加してるワン！',
+            'sheets delete sheet': 'シートを削除してるワン！',
+            'sheets duplicate sheet': 'シートを複製してるワン！',
+            'sheets format cells': 'セルを整形してるワン！',
+            'sheets batch format cells': 'セルをまとめて整形してるワン！',
+            'sheets insert rows': '行を追加してるワン！',
+            'sheets merge cells': 'セルを結合してるワン！',
+            'sheets unmerge cells': 'セル結合を解除してるワン！',
+            'sheets update borders': '罫線を更新してるワン！',
+            'sheets create chart': 'グラフを作成してるワン！',
+            'sheets update chart': 'グラフを更新してるワン！',
+            'sheets delete chart': 'グラフを削除してるワン！',
+            'sheets copy to': 'シートをコピーしてるワン！',
+            'sheets check access': 'アクセス権を確認してるワン！',
+            'sheets add conditional formatting': '条件付き書式を設定してるワン！',
+            'sheets update sheet properties': 'シート設定を更新してるワン！',
+            'sheets insert date': '日付を入力してるワン！',
+            'sheets insert link': 'リンクを挿入してるワン！',
+          };
+
+          const getFriendlyToolMessage = (toolName: string): string => {
+            return friendlyToolMessages[toolName] || `${toolName} を実行中ワン！`;
           };
 
           // Summarize tool input for progress display
