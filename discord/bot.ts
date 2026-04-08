@@ -7,6 +7,9 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   ComponentType,
   type Interaction,
 } from "npm:discord.js@14.14.1";
@@ -48,7 +51,20 @@ export interface MentionHelpers {
   registerCancel: (cancelId: string, callback: () => void) => void;
   /** Unregister a cancel callback. */
   unregisterCancel: (cancelId: string) => void;
+  /** Send a progress message with "追加指示" and "キャンセル" buttons. */
+  sendProgressWithButtons: (text: string, cancelId: string, instructionId: string) => Promise<Message>;
+  /** Edit a progress message while keeping both buttons. */
+  editProgressWithButtons: (msg: Message, text: string, cancelId: string, instructionId: string) => Promise<void>;
+  /** Register a callback for additional instructions (modal submit + reply detection). */
+  registerInstructionCallback: (instructionId: string, progressMsgId: string, callback: InstructionCallback) => void;
+  /** Unregister an instruction callback. */
+  unregisterInstructionCallback: (instructionId: string, progressMsgId: string) => void;
 }
+
+/**
+ * Callback invoked when a user sends additional instructions via modal or reply.
+ */
+export type InstructionCallback = (text: string, userId: string, username: string) => void;
 
 /**
  * Callback invoked when the bot receives a @mention.
@@ -87,6 +103,10 @@ export async function createMentionBot(
 
   // Registry for cancel callbacks: cancelId → abort callback
   const cancelCallbacks = new Map<string, () => void>();
+  // Registry for instruction callbacks: instructionId → callback (for modal submit)
+  const instructionCallbacks = new Map<string, InstructionCallback>();
+  // Registry for reply callbacks: progressMsgId → callback (for reply detection)
+  const replyCallbacks = new Map<string, InstructionCallback>();
 
   const client = new Client({
     intents: [
@@ -96,31 +116,74 @@ export async function createMentionBot(
     ],
   });
 
-  // ---- Button interaction handler ----
+  // ---- Interaction handler (buttons + modals) ----
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+    // Handle modal submissions (追加指示)
+    if ('isModalSubmit' in interaction && (interaction as any).isModalSubmit()) {
+      const modalInteraction = interaction as any;
+      const modalId: string = modalInteraction.customId;
+      if (modalId.startsWith('modal-instruction-')) {
+        const instructionId = modalId.replace('modal-', '');
+        const callback = instructionCallbacks.get(instructionId);
+        if (callback) {
+          const text = modalInteraction.fields.getTextInputValue('instruction-text');
+          if (text?.trim()) {
+            callback(text.trim(), modalInteraction.user.id, modalInteraction.user.username);
+          }
+        }
+        try {
+          await modalInteraction.reply({ content: '📝 追加指示を受け付けました！処理完了後に続行します。', ephemeral: true });
+        } catch {
+          try { await modalInteraction.deferUpdate(); } catch { /* ignore */ }
+        }
+      }
+      return;
+    }
+
     if (!interaction.isButton()) return;
 
-    const cancelId = interaction.customId;
-    const callback = cancelCallbacks.get(cancelId);
-    if (!callback) {
-      // Not a cancel button we're tracking — ignore
+    // Handle "追加指示" button → show modal
+    if (interaction.customId.startsWith('instruction-')) {
+      const instructionId = interaction.customId;
+      const modal = new ModalBuilder()
+        .setCustomId(`modal-${instructionId}`)
+        .setTitle('追加指示');
+      const textInput = new TextInputBuilder()
+        .setCustomId('instruction-text')
+        .setLabel('追加の指示を入力してください')
+        .setStyle(TextInputStyle.Paragraph)
+        .setPlaceholder('例: あと○○も考慮して')
+        .setRequired(true);
+      const row = new ActionRowBuilder<TextInputBuilder>().addComponents(textInput);
+      modal.addComponents(row);
       try {
-        await interaction.deferUpdate();
+        await interaction.showModal(modal);
       } catch { /* ignore */ }
       return;
     }
 
-    // Execute the cancel callback
-    callback();
-
-    // Acknowledge the interaction and update the button to show cancelled state
-    try {
-      await interaction.update({
-        components: [createCancelButtonRow(cancelId, true)],
-      });
-    } catch {
-      // Ignore interaction errors
+    // Handle cancel button
+    if (interaction.customId.startsWith('cancel-')) {
+      const cancelId = interaction.customId;
+      const callback = cancelCallbacks.get(cancelId);
+      if (!callback) {
+        try { await interaction.deferUpdate(); } catch { /* ignore */ }
+        return;
+      }
+      callback();
+      // Disable both buttons
+      const suffix = cancelId.replace('cancel-', '');
+      const instructionId = `instruction-${suffix}`;
+      try {
+        await interaction.update({
+          components: [createProgressButtonRow(cancelId, instructionId, true)],
+        });
+      } catch { /* ignore */ }
+      return;
     }
+
+    // Unknown button — acknowledge silently
+    try { await interaction.deferUpdate(); } catch { /* ignore */ }
   });
 
   // ---- Ready event ----
@@ -135,6 +198,19 @@ export async function createMentionBot(
   client.on(Events.MessageCreate, async (message: Message) => {
     // Ignore own messages only — react to all other bots
     if (client.user && message.author.id === client.user.id) return;
+
+    // Check if this message is a reply to an active progress message (追加指示)
+    if (message.reference?.messageId) {
+      const replyCallback = replyCallbacks.get(message.reference.messageId);
+      if (replyCallback) {
+        const text = message.content.trim();
+        if (text) {
+          replyCallback(text, message.author.id, message.author.username);
+          try { await message.react('📝'); } catch { /* ignore */ }
+        }
+        return; // Reply to progress message takes priority over @mention
+      }
+    }
 
     // Only react when the bot is @mentioned
     if (!client.user || !message.mentions.has(client.user.id)) return;
@@ -256,6 +332,34 @@ export async function createMentionBot(
       cancelCallbacks.delete(cancelId);
     };
 
+    // Progress message with both "追加指示" and "キャンセル" buttons
+    const sendProgressWithButtons = async (text: string, cancelId: string, instructionId: string): Promise<Message> => {
+      return await message.channel.send({
+        content: text,
+        components: [createProgressButtonRow(cancelId, instructionId, false)],
+      });
+    };
+
+    const editProgressWithButtons = async (msg: Message, text: string, cancelId: string, instructionId: string): Promise<void> => {
+      try {
+        await msg.edit({
+          content: text,
+          components: [createProgressButtonRow(cancelId, instructionId, false)],
+        });
+      } catch { /* ignore */ }
+    };
+
+    // Instruction callback registration (for both modal and reply detection)
+    const registerInstructionCallback = (instructionId: string, progressMsgId: string, callback: InstructionCallback) => {
+      instructionCallbacks.set(instructionId, callback);
+      replyCallbacks.set(progressMsgId, callback);
+    };
+
+    const unregisterInstructionCallback = (instructionId: string, progressMsgId: string) => {
+      instructionCallbacks.delete(instructionId);
+      replyCallbacks.delete(progressMsgId);
+    };
+
     // Build helpers object
     const helpers: MentionHelpers = {
       addReaction,
@@ -269,6 +373,10 @@ export async function createMentionBot(
       disableCancelButton,
       registerCancel,
       unregisterCancel,
+      sendProgressWithButtons,
+      editProgressWithButtons,
+      registerInstructionCallback,
+      unregisterInstructionCallback,
     };
 
     // Call the handler
@@ -314,6 +422,25 @@ function createCancelButtonRow(cancelId: string, disabled: boolean) {
     .setDisabled(disabled);
 
   return new ActionRowBuilder<ButtonBuilder>().addComponents(button);
+}
+
+/**
+ * Create an ActionRow with "追加指示" and "キャンセル" buttons.
+ */
+function createProgressButtonRow(cancelId: string, instructionId: string, disabled: boolean) {
+  const instructionButton = new ButtonBuilder()
+    .setCustomId(instructionId)
+    .setLabel('追加指示')
+    .setStyle(ButtonStyle.Primary)
+    .setDisabled(disabled);
+
+  const cancelButton = new ButtonBuilder()
+    .setCustomId(cancelId)
+    .setLabel(disabled ? 'キャンセル済み' : 'キャンセル')
+    .setStyle(ButtonStyle.Secondary)
+    .setDisabled(disabled);
+
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(instructionButton, cancelButton);
 }
 
 /**

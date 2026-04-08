@@ -136,14 +136,22 @@ if (import.meta.main) {
           try { await helpers.sendTyping(); } catch { /* ignore */ }
         }, 8000);
 
-        // Generate a unique cancel ID for this request
-        const cancelId = `cancel-${context.messageId}-${Date.now()}`;
+        // Generate unique IDs for cancel and instruction buttons (shared suffix for pairing)
+        // Using `let` so they can be re-pointed for follow-up queries
+        const idSuffix = `${context.messageId}-${Date.now()}`;
+        let cancelId = `cancel-${idSuffix}`;
+        let instructionId = `instruction-${idSuffix}`;
 
-        // Send initial progress message with cancel button
+        // Queue for additional instructions received during processing
+        const additionalInstructions: Array<{ text: string; userId: string; username: string }> = [];
+
+        // Send initial progress message with "追加指示" and "キャンセル" buttons
         // deno-lint-ignore no-explicit-any
         let progressMsg: any = null;
+        let progressMsgId: string | null = null;
         try {
-          progressMsg = await helpers.sendProgressWithCancel("ワン！確認します🐶", cancelId);
+          progressMsg = await helpers.sendProgressWithButtons("ワン！確認します🐶", cancelId, instructionId);
+          if (progressMsg) progressMsgId = progressMsg.id;
         } catch {
           // Ignore if progress message fails
         }
@@ -167,7 +175,7 @@ if (import.meta.main) {
             // Enough time has passed — edit immediately
             lastEditTime = now;
             pendingEditText = null;
-            helpers.editProgressWithCancel(progressMsg, text, cancelId).catch(() => { });
+            helpers.editProgressWithButtons(progressMsg, text, cancelId, instructionId).catch(() => { });
           } else {
             // Too soon — schedule a debounced edit
             pendingEditText = text;
@@ -175,7 +183,7 @@ if (import.meta.main) {
             pendingEditTimer = setTimeout(() => {
               if (pendingEditText && progressMsg) {
                 lastEditTime = Date.now();
-                helpers.editProgressWithCancel(progressMsg, pendingEditText, cancelId).catch(() => { });
+                helpers.editProgressWithButtons(progressMsg, pendingEditText, cancelId, instructionId).catch(() => { });
                 pendingEditText = null;
               }
             }, EDIT_DEBOUNCE_MS - timeSinceLastEdit);
@@ -190,6 +198,20 @@ if (import.meta.main) {
             console.log(`[Cancel] User cancelled request: ${cancelId}`);
             controller.abort();
           });
+
+          // Register instruction callback: modal submit or reply → queue additional instruction
+          if (progressMsgId) {
+            helpers.registerInstructionCallback(instructionId, progressMsgId, (text, userId, username) => {
+              additionalInstructions.push({ text, userId, username });
+              console.log(`[AdditionalInstruction] Queued from ${username}: ${text.substring(0, 80)}...`);
+              // Update progress to show receipt confirmation
+              if (progressMsg) {
+                const count = additionalInstructions.length;
+                const notice = `\n\n📝 追加指示を${count}件受け付けました！処理完了後に続行します。`;
+                helpers.editProgressWithButtons(progressMsg, `🐶 処理中...${notice}`, cancelId, instructionId).catch(() => {});
+              }
+            });
+          }
 
           // Build prompt with Discord context metadata
           const fullPrompt = buildPrompt(prompt, context);
@@ -323,42 +345,116 @@ if (import.meta.main) {
           // Cancel any pending debounced edit
           if (pendingEditTimer) clearTimeout(pendingEditTimer);
 
-          // Clean up cancel registration
+          // Clean up cancel & instruction callbacks
           helpers.unregisterCancel(cancelId);
+          if (progressMsgId) helpers.unregisterInstructionCallback(instructionId, progressMsgId);
 
-          // Check if the request was cancelled
-          if (result.response === "Request was cancelled") {
-            // Silently delete the progress message
-            if (progressMsg) {
-              await helpers.deleteProgress(progressMsg);
-            }
-          } else {
-            // Delete the progress message
-            if (progressMsg) {
-              await helpers.deleteProgress(progressMsg);
-            }
-
-            // Check for reaction-only marker from Claude
-            const response = result.response || "応答がありませんでした。";
+          // Helper: send response (handles REACTION_ONLY pattern)
+          const sendResponse = async (response: string) => {
             const reactionMatch = response.trim().match(/\[REACTION_ONLY:(.+?)\]/);
             if (reactionMatch) {
-              // React with emoji only, no text reply
               const emojis = reactionMatch[1].split(",");
               for (const emoji of emojis) {
                 await helpers.addReaction(emoji.trim());
               }
             } else {
-              // Reply with the final response (as a reply with @mention)
               await helpers.reply(response);
             }
+          };
+
+          // Check if the request was cancelled
+          if (result.response === "Request was cancelled") {
+            if (progressMsg) await helpers.deleteProgress(progressMsg);
+          } else if (additionalInstructions.length > 0 && result.sessionId) {
+            // ---- AUTO-CONTINUE: additional instructions queued ----
+
+            // Send the original response first
+            if (progressMsg) await helpers.deleteProgress(progressMsg);
+            await sendResponse(result.response || "応答がありませんでした。");
+
+            // Build combined prompt from queued instructions
+            const combined = additionalInstructions
+              .map((instr, i) => {
+                const prefix = additionalInstructions.length === 1
+                  ? `追加指示 (from ${instr.username})`
+                  : `追加指示${i + 1} (from ${instr.username})`;
+                return `${prefix}: ${instr.text}`;
+              })
+              .join('\n');
+            const followUpPrompt = buildPrompt(combined, context);
+
+            // New progress message for follow-up
+            const followUpIdSuffix = `followup-${context.messageId}-${Date.now()}`;
+            const followUpCancelId = `cancel-${followUpIdSuffix}`;
+            const followUpInstructionId = `instruction-${followUpIdSuffix}`;
+            // deno-lint-ignore no-explicit-any
+            let followUpProgressMsg: any = null;
+            try {
+              followUpProgressMsg = await helpers.sendProgressWithButtons(
+                "📝 追加指示を処理中ワン！🐶",
+                followUpCancelId,
+                followUpInstructionId,
+              );
+            } catch { /* ignore */ }
+
+            const followUpController = new AbortController();
+            helpers.registerCancel(followUpCancelId, () => {
+              console.log(`[Cancel] User cancelled follow-up: ${followUpCancelId}`);
+              followUpController.abort();
+            });
+
+            // Re-point closure variables for updateProgress to work with follow-up
+            lastEditTime = 0;
+            pendingEditText = null;
+            if (pendingEditTimer) clearTimeout(pendingEditTimer);
+            progressMsg = followUpProgressMsg;
+            cancelId = followUpCancelId;
+            instructionId = followUpInstructionId;
+
+            try {
+              const followUpResult = await sendToClaudeCode(
+                workDir,
+                followUpPrompt,
+                followUpController,
+                result.sessionId,
+                undefined,
+                onStreamJson,
+                false,
+                modelOptions,
+              );
+
+              if (followUpResult.sessionId) {
+                channelSessions.set(context.channelId, followUpResult.sessionId);
+              }
+              if (pendingEditTimer) clearTimeout(pendingEditTimer);
+              helpers.unregisterCancel(followUpCancelId);
+
+              if (followUpProgressMsg) await helpers.deleteProgress(followUpProgressMsg);
+
+              if (followUpResult.response === "Request was cancelled") {
+                // Follow-up was cancelled — nothing more to do
+              } else {
+                await sendResponse(followUpResult.response || "追加指示の処理が完了しました。");
+              }
+            } catch (followUpError) {
+              console.error("[AdditionalInstruction] Follow-up failed:", followUpError);
+              helpers.unregisterCancel(followUpCancelId);
+              if (followUpProgressMsg) await helpers.deleteProgress(followUpProgressMsg);
+              await helpers.reply(
+                `追加指示の処理中にエラーが発生しました: ${followUpError instanceof Error ? followUpError.message : "Unknown error"}`
+              );
+            }
+          } else {
+            // ---- Normal completion (no additional instructions) ----
+            if (progressMsg) await helpers.deleteProgress(progressMsg);
+            await sendResponse(result.response || "応答がありませんでした。");
           }
 
         } finally {
           clearInterval(typingInterval);
-          // Clean up pending timer if still active
           if (pendingEditTimer) clearTimeout(pendingEditTimer);
-          // Ensure cancel callback is cleaned up
           helpers.unregisterCancel(cancelId);
+          if (progressMsgId) helpers.unregisterInstructionCallback(instructionId, progressMsgId);
         }
       },
     );
