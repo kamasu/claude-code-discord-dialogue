@@ -73,6 +73,27 @@ function parseThinkingConfig(value?: string): ThinkingConfig | undefined {
   return undefined;
 }
 
+/**
+ * Parse CLAUDE_EFFORT env var into EffortLevel with runtime validation.
+ * An invalid value reaches the CLI as `--effort <value>`. Old CLIs (SDK <=0.2.x)
+ * died instantly with exit code 1 on it (incident: CLAUDE_EFFORT=ultracode,
+ * 2026-06-12); current CLIs warn and fall back to the default. Validating here
+ * keeps the failure visible in our own logs instead of relying on CLI behavior.
+ */
+const VALID_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const satisfies
+  readonly EffortLevel[];
+function parseEffortConfig(value?: string): EffortLevel | undefined {
+  if (!value) return undefined;
+  const v = value.trim().toLowerCase();
+  if ((VALID_EFFORT_LEVELS as readonly string[]).includes(v)) {
+    return v as EffortLevel;
+  }
+  console.warn(
+    `[Config] Invalid CLAUDE_EFFORT value: "${value}" (valid: ${VALID_EFFORT_LEVELS.join("/")}), ignoring.`,
+  );
+  return undefined;
+}
+
 // ================================
 // Mention → Claude Code Handler
 // ================================
@@ -318,7 +339,7 @@ if (import.meta.main) {
           // Model options — uses claude login auth (no API key needed)
           const claudeModel = Deno.env.get("CLAUDE_MODEL");
           const claudeThinking = parseThinkingConfig(Deno.env.get("CLAUDE_THINKING"));
-          const claudeEffort = Deno.env.get("CLAUDE_EFFORT") as EffortLevel | undefined;
+          const claudeEffort = parseEffortConfig(Deno.env.get("CLAUDE_EFFORT"));
           const modelOptions: ClaudeModelOptions = {
             permissionMode: "bypassPermissions",
             ...(claudeModel && { model: claudeModel }),

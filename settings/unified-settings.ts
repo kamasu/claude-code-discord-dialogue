@@ -272,7 +272,8 @@ export const OPERATION_MODES = {
   'delegate': {
     name: 'Delegate Mode',
     description: 'Restricts to Teammate + Task tools only — for agent team leaders',
-    permissionMode: 'delegate' as const,
+    // SDK 0.3.x removed the 'delegate' permission mode — map to the closest restrictive mode
+    permissionMode: 'dontAsk' as const,
     riskLevel: 'low'
   }
 } as const;

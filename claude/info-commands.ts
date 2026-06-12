@@ -387,7 +387,7 @@ export function createInfoCommandHandlers(deps: InfoCommandHandlerDeps) {
         }
 
         case 'set-permissions': {
-          const validModes = ['default', 'plan', 'acceptEdits', 'bypassPermissions', 'delegate', 'dontAsk'];
+          const validModes = ['default', 'plan', 'acceptEdits', 'bypassPermissions', 'dontAsk', 'auto'];
           if (!value || !validModes.includes(value)) {
             await ctx.editReply({
               content: `Invalid permission mode. Available: ${validModes.join(', ')}`,

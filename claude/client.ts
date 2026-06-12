@@ -95,9 +95,9 @@ export function cleanSessionId(sessionId: string): string {
 }
 
 // Valid SDK permission modes (maps to CLI --permission-mode)
-// New SDK (claude-agent-sdk) supports 6 modes:
-//   default, acceptEdits, bypassPermissions, plan, delegate, dontAsk
-export type SDKPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'delegate' | 'dontAsk';
+// SDK 0.3.x PermissionMode:
+//   default, acceptEdits, bypassPermissions, plan, dontAsk, auto
+export type SDKPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk' | 'auto';
 
 // Thinking configuration — native SDK option (replaces MAX_THINKING_TOKENS env var hack)
 export type ThinkingConfig =
@@ -106,7 +106,9 @@ export type ThinkingConfig =
   | { type: 'disabled' };                    // No thinking
 
 // Effort level — controls reasoning depth
-export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
+// (xhigh: Fable 5 / Opus 4.7+ only. "ultracode" is NOT an effort level — old CLIs (≤0.2.x SDK)
+// crashed on unknown values with exit code 1; current CLIs warn and ignore them)
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 // Full query options for Claude Agent SDK
 export interface ClaudeModelOptions {
@@ -115,7 +117,7 @@ export interface ClaudeModelOptions {
   permissionMode?: SDKPermissionMode;
   /** Native thinking configuration — replaces old MAX_THINKING_TOKENS env var */
   thinking?: ThinkingConfig;
-  /** Effort level — controls reasoning depth (low/medium/high/max) */
+  /** Effort level — controls reasoning depth (low/medium/high/xhigh/max) */
   effort?: EffortLevel;
   /** Maximum budget in USD — query stops if exceeded */
   maxBudgetUsd?: number;
@@ -242,9 +244,10 @@ export async function sendToClaudeCode(
 
       const queryOptions = {
         prompt,
-        abortController: controller,
         options: {
           cwd: workDir,
+          // SDK 0.3.x: abortController is an Options field — aborting kills the CLI subprocess
+          abortController: controller,
           permissionMode: permMode,
           // Use Claude Code's system prompt + optional append
           systemPrompt: systemPromptConfig,
@@ -277,17 +280,21 @@ export async function sendToClaudeCode(
           ...(modelOptions?.outputFormat && { outputFormat: modelOptions.outputFormat }),
           // MCP servers: pass stdio-type servers programmatically
           // (URL-type servers cause exit code 1, so filter them out — remote claude.ai servers are auto-discovered)
+          // alwaysLoad: SDK 0.3.x connects MCP servers in the background by default, so tools may be
+          // missing on turn 1. alwaysLoad blocks startup until connected — required for Discord MCP.
           ...(mcpServers && {
             mcpServers: Object.fromEntries(
-              Object.entries(mcpServers).filter(([_, cfg]) => cfg.type === 'stdio')
+              Object.entries(mcpServers)
+                .filter(([_, cfg]) => cfg.type === 'stdio')
+                .map(([name, cfg]) => [name, { ...cfg, alwaysLoad: true }])
             ),
           }),
           // Permission / tool-use callback — handles:
           //   1. AskUserQuestion tool → routes to onAskUser callback for interactive Discord flow
           //   2. MCP tools → auto-allow tools from configured servers
           //   3. Everything else → deny (dontAsk mode blocks unapproved tools)
-          // NOTE: The SDK's runtime Zod schema requires `updatedInput` on allow responses
-          // even though the TypeScript types mark it optional — pass through original input.
+          // NOTE: `updatedInput` is optional in SDK 0.3.x (no runtime Zod validation on allow
+          // responses) — we keep passing the original input through for compatibility.
           canUseTool: async (toolName: string, input: Record<string, unknown>) => {
             // AskUserQuestion: route to Discord interactive flow
             if (toolName === 'AskUserQuestion' && modelOptions?.onAskUser) {
