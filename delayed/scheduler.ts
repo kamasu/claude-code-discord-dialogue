@@ -517,17 +517,35 @@ function formatDelay(sec: number): string {
 }
 
 function renderPollStatus(job: StoredJob): string {
+  const now = Date.now();
   const intervalSec = Math.round((job.intervalMs || 0) / 1000);
-  const head = `🔁 ポーリング中${job.summary ? ` — ${job.summary}` : ""}`;
-  const meta = `開始 ${jstTime(job.startedAt || Date.now())} ・ 間隔 ${formatDelay(intervalSec)} ・ 実行 ${job.attempts || 0}回`;
-  const next = `次回 ${jstTime(job.fireAt)}（最大${job.maxAttempts}回）`;
-  return `${head}\n${meta}\n${next}\n── 最新状況 ──\n${job.lastStatus || ""}`;
+  const elapsedSec = Math.round((now - (job.startedAt || now)) / 1000);
+  const lines = [
+    "【ポーリング実行】",
+    "以下のタスクをポーリング実行しています。",
+    `実行間隔: ${intervalSec}秒`,
+    `経過時間: ${formatDelay(elapsedSec)} (${jstTime(job.startedAt || now)}に開始、次回${jstTime(job.fireAt)}に実行予定)`,
+    `実行回数: ${job.attempts || 0}回（最大${job.maxAttempts}回）`,
+    `最新実行状況: ${job.lastStatus || "—"}`,
+    "",
+    "【タスク内容】",
+    job.instruction,
+  ];
+  return lines.join("\n");
 }
 
 function renderPollFinished(job: StoredJob, kind: "done" | "timeout"): string {
-  const elapsedSec = Math.round((Date.now() - (job.startedAt || Date.now())) / 1000);
-  const label = kind === "done" ? "✅ ポーリング完了" : "⏱️ ポーリング終了（最大回数）";
-  const head = `${label}${job.summary ? ` — ${job.summary}` : ""}`;
-  const meta = `開始 ${jstTime(job.startedAt || Date.now())} ・ 全${job.attempts}回 ・ 所要 ${formatDelay(elapsedSec)}`;
-  return `${head}\n${meta}\n── 最新状況 ──\n${job.lastStatus || ""}`;
+  if (kind === "done") {
+    return [
+      "【ポーリング実行】",
+      "☑️ タスクのポーリングが完了しました！",
+      "新しいメッセージで返答を行いました。",
+    ].join("\n");
+  }
+  // timeout: 最大回数に達して終了
+  return [
+    "【ポーリング実行】",
+    `⏱️ 最大${job.maxAttempts}回に達したためポーリングを終了しました。`,
+    `最後の状況: ${job.lastStatus || "—"}`,
+  ].join("\n");
 }
