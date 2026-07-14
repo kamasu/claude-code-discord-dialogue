@@ -12,6 +12,7 @@
 import { createMentionBot, type MentionContext } from "./discord/bot.ts";
 import { sendToClaudeCode, type ClaudeModelOptions, type ThinkingConfig, type EffortLevel } from "./claude/client.ts";
 import { interruptActiveQuery } from "./claude/query-manager.ts";
+import { DelayedScheduler } from "./delayed/scheduler.ts";
 
 // ================================
 // .env Auto-Load
@@ -136,6 +137,23 @@ if (import.meta.main) {
 
     // Track active Claude session per channel to allow conversation continuity
     const channelSessions = new Map<string, string>(); // channelId → sessionId
+
+    // Build model options from env (shared by the main handler and delayed re-invocations)
+    const getModelOptions = (): ClaudeModelOptions => {
+      const claudeModel = Deno.env.get("CLAUDE_MODEL");
+      const claudeThinking = parseThinkingConfig(Deno.env.get("CLAUDE_THINKING"));
+      const claudeEffort = parseEffortConfig(Deno.env.get("CLAUDE_EFFORT"));
+      return {
+        permissionMode: "bypassPermissions",
+        ...(claudeModel && { model: claudeModel }),
+        ...(claudeThinking && { thinking: claudeThinking }),
+        ...(claudeEffort && { effort: claudeEffort }),
+      };
+    };
+
+    // Delayed / polling execution scheduler (assigned after the bot/client is created).
+    // The handler only touches this at message time, which is always after assignment.
+    let delayedScheduler: DelayedScheduler;
 
     console.log(`Starting mention-only bot...`);
     console.log(`Working directory: ${workDir}`);
@@ -337,15 +355,7 @@ if (import.meta.main) {
           const existingSessionId = channelSessions.get(context.channelId);
 
           // Model options — uses claude login auth (no API key needed)
-          const claudeModel = Deno.env.get("CLAUDE_MODEL");
-          const claudeThinking = parseThinkingConfig(Deno.env.get("CLAUDE_THINKING"));
-          const claudeEffort = parseEffortConfig(Deno.env.get("CLAUDE_EFFORT"));
-          const modelOptions: ClaudeModelOptions = {
-            permissionMode: "bypassPermissions",
-            ...(claudeModel && { model: claudeModel }),
-            ...(claudeThinking && { thinking: claudeThinking }),
-            ...(claudeEffort && { effort: claudeEffort }),
-          };
+          const modelOptions: ClaudeModelOptions = getModelOptions();
 
           // onStreamJson callback — update progress + interrupt at turn boundaries
           let wasInterrupted = false;
@@ -559,7 +569,10 @@ if (import.meta.main) {
           // Returns the sent Message (or null for reactions)
           // deno-lint-ignore no-explicit-any
           const sendResponse = async (response: string, replyTarget?: any): Promise<any> => {
-            const reactionMatch = response.trim().match(/\[REACTION_ONLY:(.+?)\]/);
+            // First-line-only match: prevents accidental triggers when the token
+            // appears mid-text (e.g. while explaining the feature itself).
+            const firstLine = response.trim().split("\n")[0].trim();
+            const reactionMatch = firstLine.match(/^\[REACTION_ONLY:(.+?)\]$/);
             if (reactionMatch) {
               const emojis = reactionMatch[1].split(",");
               for (const emoji of emojis) {
@@ -660,8 +673,17 @@ if (import.meta.main) {
             // Delete progress and send the response
             if (progressMsg) await helpers.deleteProgress(progressMsg);
             progressMsg = null;
-            const sentMsg = await sendResponse(result.response || "応答がありませんでした。");
-            if (sentMsg) lastResponseMsg = sentMsg;
+
+            // Delayed / polling command? First line decides. If handled, the raw
+            // response is NOT sent as a reply — the scheduler posts its own messages.
+            const delayedHandled = await delayedScheduler.maybeScheduleFromResponse(
+              result.response || "",
+              context,
+            );
+            if (!delayedHandled) {
+              const sentMsg = await sendResponse(result.response || "応答がありませんでした。");
+              if (sentMsg) lastResponseMsg = sentMsg;
+            }
 
             // Check if instructions arrived at completion (race window)
             if (additionalInstructions.length > 0 && currentSessionId) {
@@ -727,6 +749,18 @@ if (import.meta.main) {
     );
 
     console.log("✓ Bot has started. Press Ctrl+C to stop.");
+
+    // Initialise the delayed / polling scheduler and re-arm any persisted jobs.
+    const persistPath = Deno.env.get("DELAYED_JOBS_PATH") ||
+      `${workDir}/.delayed-jobs.json`;
+    delayedScheduler = new DelayedScheduler({
+      client: bot.client,
+      workDir,
+      channelSessions,
+      getModelOptions,
+      persistPath,
+    });
+    await delayedScheduler.init();
 
     // Graceful shutdown
     const handleSignal = () => {

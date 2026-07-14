@@ -98,3 +98,5 @@ agenthub/agents/youtube/db
 
 # Mobile development
 android-sdk/ 
+# Delayed/polling job persistence (runtime state)
+.delayed-jobs.json

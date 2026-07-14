@@ -132,6 +132,32 @@ Undo file changes made during a Claude session:
 
 Requires file checkpointing to be enabled via `/settings`.
 
+## Delayed & Polling Execution
+
+The bot process is long-lived, so it can re-invoke Claude on a timer — letting Claude keep a promise like "I'll report when the build finishes" without the user having to ping it again. Pending jobs are persisted to a JSON file (`DELAYED_JOBS_PATH`, default `$WORK_DIR/.delayed-jobs.json`) and re-armed on startup, so they survive a restart/redeploy.
+
+Both commands are recognised **only on the first line** of a Claude response (first-line matching, like `[REACTION_ONLY:…]`, avoids accidental triggers when the token appears mid-text).
+
+**One-shot** — runs once after the delay; the result is posted as a new message:
+
+```
+遅延実行:20m
+sunny で走っているビルドの完了を確認し、完了していれば配信して報告する（自己完結で書く）
+```
+
+Duration accepts `30s` / `10m` / `2h` / bare seconds. Clamped to 5s–3h.
+
+**Polling** — a single status message is edited each cycle (start time, interval, attempt count, next fire) to reduce noise; only the final report is a new message:
+
+```
+ポーリング:30s:20
+ビルドが完了したか確認する
+```
+
+`ポーリング:<interval>[:<maxAttempts>]` — interval clamped 10s–1h, maxAttempts default 20 (cap 60). Each cycle the bot asks Claude to answer `ポーリング継続: <一言>` (keep polling) or `ポーリング完了` + report (stop). A fired job may itself return another command, enabling self-rescheduling.
+
+> Note: this mechanism only re-invokes Claude; it does **not** keep an external job (e.g. a remote build) alive. Long jobs must run detached (e.g. `nohup`/`tmux` with a completion marker) so the polling checks observe them from the outside.
+
 ## Structured Output
 
 Force Claude to respond in JSON matching a specific schema:

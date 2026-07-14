@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-07-14
+
+### Added
+- **Delayed & Polling Execution**: Claude responses whose **first line** is `遅延実行:<duration>` (one-shot) or `ポーリング:<interval>[:<maxAttempts>]` (polling) schedule an in-process timer that re-invokes Claude later — so the bot can keep "I'll report when it's done" promises without the user pinging it again. Pending jobs are persisted (`DELAYED_JOBS_PATH`) and re-armed on startup, surviving restarts/redeploys. Polling edits a single status message per cycle (start time, interval, attempt count, next fire) and posts only the final report as a new message.
+
+### Changed
+- **First-line-only command matching**: `[REACTION_ONLY:…]` (and the new delayed/polling commands) now match only on the first line of a response, instead of anywhere in the body. Prevents accidental triggers when the token appears mid-text (e.g. while explaining the feature).
+
 ## [2.2.0] - 2025-07-18
 
 ### Added
