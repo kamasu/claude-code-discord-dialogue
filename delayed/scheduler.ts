@@ -96,13 +96,18 @@ function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
 
-/** How many leading non-empty lines may precede the command line. */
-const MAX_PREAMBLE_LINES = 6;
+/**
+ * Parse the FIRST LINE of a response for a delayed/polling start command.
+ * Returns null if the first line is not a recognised command.
+ */
+export function parseStartCommand(response: string): ParsedCommand | null {
+  const text = response.replace(/^﻿/, "");
+  const nl = text.indexOf("\n");
+  const firstLine = (nl === -1 ? text : text.slice(0, nl)).trim();
+  const rest = nl === -1 ? "" : text.slice(nl + 1).trim();
 
-/** Match a single line as a delayed/polling command; `rest` becomes the instruction. */
-function matchCommandLine(line: string, rest: string): ParsedCommand | null {
   // One-shot: 遅延実行:<duration>
-  let m = line.match(/^遅延実行\s*[:：]\s*(\S+)$/);
+  let m = firstLine.match(/^遅延実行\s*[:：]\s*(\S+)$/);
   if (m) {
     const ms = parseDuration(m[1]);
     if (ms == null) return null;
@@ -115,7 +120,7 @@ function matchCommandLine(line: string, rest: string): ParsedCommand | null {
   }
 
   // Polling: ポーリング:<interval>[:<maxAttempts>]
-  m = line.match(/^ポーリング\s*[:：]\s*([^:：\s]+)(?:\s*[:：]\s*(\d+))?$/);
+  m = firstLine.match(/^ポーリング\s*[:：]\s*([^:：\s]+)(?:\s*[:：]\s*(\d+))?$/);
   if (m) {
     const interval = parseDuration(m[1]);
     if (interval == null) return null;
@@ -131,40 +136,6 @@ function matchCommandLine(line: string, rest: string): ParsedCommand | null {
     };
   }
 
-  return null;
-}
-
-/**
- * Scan the response for a delayed/polling start command line.
- *
- * The command should ideally be on line 1, but the model often prepends a short
- * acknowledgement / @mention before it (which silently disabled the whole
- * feature under strict first-line matching). So we tolerate up to
- * MAX_PREAMBLE_LINES leading non-empty lines and take the first line that is
- * *exactly* a command. Lines inside ``` / ~~~ fences are skipped so that
- * documenting the syntax (as in this help text) never triggers a real run.
- * Everything after the command line becomes the instruction.
- */
-export function parseStartCommand(response: string): ParsedCommand | null {
-  const lines = response.replace(/^﻿/, "").split("\n");
-  let inFence = false;
-  let seen = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (/^(```|~~~)/.test(trimmed)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence || trimmed === "") continue;
-
-    const rest = lines.slice(i + 1).join("\n").trim();
-    const cmd = matchCommandLine(trimmed, rest);
-    if (cmd) return cmd;
-
-    // A non-command, non-blank line counts as preamble. Give up once the
-    // command clearly isn't near the top (avoids triggering from deep prose).
-    if (++seen >= MAX_PREAMBLE_LINES) break;
-  }
   return null;
 }
 
